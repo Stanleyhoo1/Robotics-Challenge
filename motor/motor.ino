@@ -4,8 +4,8 @@
 MotoronI2C motoron(16, &Wire1);
 const uint8_t TEST_MOTOR = 1;
 
-const int ENC_A = 2;
-const int ENC_B = 3;
+const int ENC_A = 18;
+const int ENC_B = 19;
 
 volatile long encoderCount = 0;
 volatile bool lastA = false;
