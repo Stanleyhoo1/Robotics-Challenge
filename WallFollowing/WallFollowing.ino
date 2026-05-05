@@ -3,31 +3,6 @@
 
 MotoronI2C motoron;
 
-const int ENC_A = 18;
-const int ENC_B = 19;
-
-volatile long encoderCount = 0;
-volatile bool lastA = false;
-volatile bool lastB = false;
-
-void encoderISR_A() {
-  bool a = digitalRead(ENC_A);
-  bool b = digitalRead(ENC_B);
-  if (a != lastA) {
-    encoderCount += (a == b) ? -1 : 1;
-    lastA = a;
-  }
-}
-
-void encoderISR_B() {
-  bool a = digitalRead(ENC_A);
-  bool b = digitalRead(ENC_B);
-  if (b != lastB) {
-    encoderCount += (a == b) ? 1 : -1;
-    lastB = b;
-  }
-}
-
 const uint8_t TEST_MOTOR = 1; // change to 2 or 3 for other channels
 
 void setup() {
