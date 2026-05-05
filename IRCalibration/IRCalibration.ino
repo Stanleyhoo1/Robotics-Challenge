@@ -1,6 +1,6 @@
 #include <kvstore_global_api.h>
 
-const int sensorPins[9] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
+const int sensorPins[9] = {30, 31, 32, 33, 34, 35, 36, 37, 38};
 const int ctrlPin = 12;
 const int SensorCount = 9;
 const unsigned int timeout = 2500;
