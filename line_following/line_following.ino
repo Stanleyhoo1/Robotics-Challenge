@@ -18,8 +18,8 @@ MotoronI2C motoron(16, &Wire1);
 const uint8_t LEFT_MOTOR  = 1;
 const uint8_t RIGHT_MOTOR = 2;
 
-const int BASE_SPEED = 300;
-const float KP = 0.05;
+const int BASE_SPEED = 500;
+const float KP = 0.1;
 const float KP_AGGRESSIVE = 0.15;
 const int AGGRESSIVE_DURATION = 2000;
 
@@ -34,7 +34,7 @@ float gyroZOffset = 0;
 
 // ---- Junction ----
 // 0 = straight, 1 = turn right, -1 = turn left
-const int junctionActions[] = {-1, -1, -1};
+const int junctionActions[] = {-1, 1, -1};
 int junctionCount = 0;
 bool inJunction = false;
 
