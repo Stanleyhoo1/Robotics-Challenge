@@ -1,34 +1,44 @@
-#include <WiFi.h>
+#include <MiniMessenger.h>
+#include "secrets.h"
 
-const char* SSID     = "PhaseSpaceNetwork_2.4G";
-const char* PASSWORD = "8igMacNet";
+MiniMessenger messenger;
+const char* BoardId = "Leonard";  // Remember to choose a name for your robot :)
+
+// Callback function that runs whenever a new message arrives
+void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t length) {
+  Serial.print("Message from Board ");
+  Serial.print(metadata.fromBoardId);
+  Serial.print(": ");
+  
+  // Print the payload as text
+  for (size_t i = 0; i < length; i++) {
+    Serial.write(payload[i]);
+  }
+  Serial.println();
+}
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial);
+  
+  // Register the callback function
+  messenger.onMessage(onMessage);
 
-  Serial.print("Connecting to WiFi");
-  WiFi.begin(SSID, PASSWORD);
+  // Initialize messenger
+  messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nFailed to connect!");
-    Serial.print("WiFi status code: ");
-    Serial.println(WiFi.status());
-  } else {
-    Serial.println("\nConnected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("RSSI: ");
-    Serial.print(WiFi.RSSI());
-    Serial.println(" dBm");
-  }
+  Serial.println("Messenger Ready!");
 }
 
-void loop() {}
+void loop() {
+  // Critical: Keep the messenger connection alive
+  messenger.loop();
+
+  static unsigned long lastSend = 0;
+  if (messenger.isConnected() && millis() - lastSend > 5000) {
+    lastSend = millis();
+    
+    // Send a message to Board "2"
+    messenger.sendToBoard("2", "Hello from Terminator!");
+    Serial.println("Message sent!");
+  }
+}
