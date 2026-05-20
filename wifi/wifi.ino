@@ -38,7 +38,7 @@ void loop() {
     lastSend = millis();
     
     // Send a message to Board "2"
-    messenger.sendToBoard("2", "Hello from Terminator!");
+    messenger.sendToBoard("2", "Hello from Leonard!");
     Serial.println("Message sent!");
   }
 }
