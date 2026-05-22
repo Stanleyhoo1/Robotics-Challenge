@@ -1,16 +1,18 @@
 #include <MiniMessenger.h>
+#include <Servo.h>
 #include "secrets.h" 
 
 /*
- * GIGA Safety Test
+ * GIGA Servo Safety Test
  * 
  * This sketch demonstrates the "Bare Minimum" safety integration for an Arduino GIGA.
  * - Registers with the server every 10 seconds.
  * - Listens for Emergency Stop and Individual Disable commands.
- * - Safety state is maintained by a "Heartbeat" (enable=1).
+ * - Only active when the server sends a "Heartbeat" (enable=1).
  */
 
 MiniMessenger messenger;
+
 
 // --- CONFIGURATION ---
 const char* BoardId = "Leonard";     // Your Board ID (must match dashboard)
@@ -18,6 +20,7 @@ bool safetyEnabled = false;      // Controlled by Heartbeats/Emergency commands
 
 // --- STATE VARIABLES ---
 unsigned long lastRegisterMs = 0;
+unsigned long lastMsgMs = 0;
 
 // --- SAFETY WATCHDOG ---
 unsigned long lastHeartbeatMs = 0;
@@ -53,7 +56,7 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
 void setup() {
     Serial.begin(115200);
         
-    Serial.println("\n--- GIGA SAFETY TEST STARTING ---");
+    Serial.println("\n--- GIGA SERVO SAFETY TEST STARTING ---");
 
     // Initialize Network and MQTT
     messenger.onMessage(onMessage);
@@ -87,14 +90,10 @@ void loop() {
     }
 
     // 2. THE SAFETY GATE
-    // If safety is NOT enabled, we halt operations. 
+    // If safety is NOT enabled, we kill the entire program 
     if (!safetyEnabled) {
-        // Safe your hardware here (e.g., set motors to 0, turn off lasers, etc.)
         
-        return; // Exit loop early so no operational code runs
+        return; // Exit loop early so no sweep code runs
     }
 
-    // 3. MAIN OPERATION
-    // We only reach this code if safetyEnabled == true
-    // Put your normal operational code here
 }
