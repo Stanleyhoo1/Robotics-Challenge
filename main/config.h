@@ -16,8 +16,6 @@
 #define LEFT_MOTOR      1
 #define RIGHT_MOTOR     2
 #define MOTORON_ADDRESS 16
-#define MOTOR_VOLTAGE   6
-#define INPUT_VOLTAGE   6
 #define TURN_SPEED      500
 #define FORWARD_SPEED   400
 #define MIN_TURN_SPEED  150   // minimum speed at end of turn slow-zone
@@ -57,3 +55,17 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 #define SERIAL_BAUD         115200
 #define SERIAL_WAIT_MS      3000      // max wait for Serial to connect on startup
+
+// ─────────────────────────────────────────
+// WiFi / Messaging
+// ─────────────────────────────────────────
+#define HEARTBEAT_TIMEOUT_MS    1000    // disable motors if no heartbeat within this window
+#define REGISTER_INTERVAL_MS    10000   // how often to re-register with server
+
+// ─────────────────────────────────────────
+// Status LED (RGB)
+// ─────────────────────────────────────────
+#define LED_R   50
+#define LED_G   51
+#define LED_B   52
+#define LED_BLINK_INTERVAL_MS   500     // blink rate when disabled

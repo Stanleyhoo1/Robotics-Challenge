@@ -4,7 +4,6 @@
 #include <Motoron.h>
 #include <LSM6.h>
 #include <kvstore_global_api.h>
-
 #include "config.h"
 
 // ─────────────────────────────────────────
@@ -17,36 +16,28 @@ bool showDistance = true;
 // Setup
 // =========================================
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD);
   uint32_t startWait = millis();
-  while (millis() - startWait < 3000);
+  while (!Serial && millis() - startWait < SERIAL_WAIT_MS);
 
-  // IR
   irSetup();
-
-  // Ultrasonic
   distanceSetup();
-
-  // I2C
   Wire.begin();
   Wire1.begin();
-
-  // RFID
   rfidSetup();
-
-  // Servo
   servoSetup();
-
-  // IMU + Motors
   motorsSetup();
+  wifiSetup();
 
   Serial.println("\nReady. Commands:");
   Serial.println("  <number>      → turn that many degrees (e.g. 90 or -90)");
   Serial.println("  forward       → move forward 3s at default speed");
-  Serial.println("  forward <spd> → move forward 3s at given speed (e.g. forward 500)");
+  Serial.println("  forward <spd> → move forward 3s at given speed");
   Serial.println("  ir            → toggle IR readings");
   Serial.println("  distance      → toggle distance readings");
+  Serial.println("  sensors       → toggle all sensor readings");
   Serial.println("  c             → recalibrate IR sensors");
+  Serial.println("  <anything>    → forward to server");
   delay(1000);
 }
 
@@ -54,6 +45,8 @@ void setup() {
 // Loop
 // =========================================
 void loop() {
+  wifiLoop();
+
   readAndPrintIR();
   readAndPrintDistance();
 
@@ -63,5 +56,15 @@ void loop() {
   }
 
   handleSerialCommands();
+
+  // Motor output gated on server enable signal
+  if (isEnabled) {
+    motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(FORWARD_SPEED));
+    motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(FORWARD_SPEED));
+  } else {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  }
+
   delay(20);
 }

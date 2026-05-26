@@ -6,6 +6,7 @@ void handleSerialCommands() {
 
   String input = Serial.readStringUntil('\n');
   input.trim();
+  if (input.length() == 0) return;
 
   if (input.equalsIgnoreCase("ir")) {
     showIR = !showIR;
@@ -17,15 +18,20 @@ void handleSerialCommands() {
     Serial.print("Distance readings ");
     Serial.println(showDistance ? "ON" : "OFF");
 
+  } else if (input.equalsIgnoreCase("sensors")) {
+    bool newState = !(showIR && showDistance);
+    showIR = newState;
+    showDistance = newState;
+    Serial.print("All sensor readings ");
+    Serial.println(newState ? "ON" : "OFF");
+
   } else if (input.equalsIgnoreCase("c")) {
     runCalibration();
 
   } else if (input.startsWith("forward")) {
     int speed = FORWARD_SPEED;
     int spaceIdx = input.indexOf(' ');
-    if (spaceIdx != -1) {
-      speed = input.substring(spaceIdx + 1).toInt();
-    }
+    if (spaceIdx != -1) speed = input.substring(spaceIdx + 1).toInt();
     moveForward(3000, speed);
 
   } else {
@@ -36,7 +42,8 @@ void handleSerialCommands() {
       Serial.println(" degrees...");
       turnDegrees(degrees);
     } else {
-      Serial.println("Unknown command.");
+      // Forward unrecognised commands to the server
+      wifiSend(input.c_str());
     }
   }
 }
