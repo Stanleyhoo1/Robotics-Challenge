@@ -34,7 +34,7 @@ float gyroZOffset = 0;
 
 // ---- Junction ----
 // 0 = straight, 1 = turn right, -1 = turn left
-const int junctionActions[] = {-1, 1, -1};
+const int junctionActions[] = {-1, 0, 1};
 int junctionCount = 0;
 bool inJunction = false;
 
@@ -258,7 +258,7 @@ void handleJunction() {
   // Drive forward to centre on junction
   motoron.setSpeedNow(LEFT_MOTOR,  BASE_SPEED);
   motoron.setSpeedNow(RIGHT_MOTOR, BASE_SPEED);
-  delay(400);
+  delay(300);
 
   if (action != 0) {
     spinUntilLine(action);
