@@ -22,6 +22,7 @@
 // ── main.ino ─────────────────────────────
 extern bool showIR;
 extern bool showDistance;
+extern bool showEncoders;
 extern bool isEnabled;
 extern bool useStateMachine;
 

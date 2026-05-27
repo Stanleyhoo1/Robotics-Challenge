@@ -528,11 +528,84 @@ static void navPlantingTick() {
 }
 
 // ─────────────────────────────────────────
-// Top-level dispatcher. Called from main loop() when useStateMachine is true.
+// Disable-side cleanup. main.ino calls this when it gates the loop on
+// !isEnabled; we touch file-local state that main.ino can't reach directly.
+// Idempotent — safe to call every tick while disabled.
+// ─────────────────────────────────────────
+void handleNavDisable() {
+  if (navState != NAV_DISABLED) {
+    Serial.println("[NAV] disabled (isEnabled=false) — holding");
+    navState         = NAV_DISABLED;
+    rightHalfDriving = false;
+    endHopHeading();
+  }
+}
+
+// ─────────────────────────────────────────
+// String helpers for `state`, `tag`, `pos` debug commands.
+// ─────────────────────────────────────────
+const char* navStateStr(NavState s) {
+  switch (s) {
+    case NAV_DISABLED:    return "NAV_DISABLED";
+    case NAV_LINE_FOLLOW: return "NAV_LINE_FOLLOW";
+    case NAV_ARENA_NAV:   return "NAV_ARENA_NAV";
+    case NAV_AT_TAG:      return "NAV_AT_TAG";
+    case NAV_PLANTING:    return "NAV_PLANTING";
+    case NAV_WALL_FOLLOW: return "NAV_WALL_FOLLOW";
+    case NAV_PARKED:      return "NAV_PARKED";
+  }
+  return "?";
+}
+
+const char* facingStr(Facing f) {
+  switch (f) {
+    case NORTH: return "NORTH";
+    case EAST:  return "EAST";
+    case SOUTH: return "SOUTH";
+    case WEST:  return "WEST";
+  }
+  return "?";
+}
+
+const char* tagStateStr(TagState s) {
+  switch (s) {
+    case TAG_UNKNOWN:   return "UNKNOWN";
+    case TAG_FERTILE:   return "FERTILE";
+    case TAG_INFERTILE: return "INFERTILE";
+    case TAG_PLANTED:   return "PLANTED";
+  }
+  return "?";
+}
+
+// ─────────────────────────────────────────
+// Top-level dispatcher. Called from main loop() when useStateMachine is true
+// AND isEnabled is true — main.ino owns the disable side now.
 // ─────────────────────────────────────────
 void navigationUpdate() {
+  // Defense-in-depth: if main.ino somehow calls us while disabled, hold.
+  if (!isEnabled) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    handleNavDisable();
+    return;
+  }
+
+  // Re-enable: drop back into arena nav so the planner re-evaluates from the
+  // last known robotPos. If you want manual re-engagement instead, remove
+  // this block — `nav` from the serial console can still wake the robot up.
+  if (navState == NAV_DISABLED) {
+    Serial.println("[NAV] re-enabled → NAV_ARENA_NAV");
+    navState = NAV_ARENA_NAV;
+  }
+
+  // Stub-state prints fire once per entry, not every tick.
+  static NavState lastTickState = (NavState)255;
+  const bool justEntered = (lastTickState != navState);
+  lastTickState = navState;
+
   switch (navState) {
     case NAV_DISABLED:
+      // Unreachable below the gate, but kept defensively.
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
       return;
@@ -557,13 +630,13 @@ void navigationUpdate() {
     case NAV_WALL_FOLLOW:
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
-      Serial.println("[NAV] wall-follow (stub — tunnel logic pending)");
+      if (justEntered) Serial.println("[NAV] wall-follow (stub — tunnel logic pending)");
       return;
 
     case NAV_PARKED:
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
-      Serial.println("[NAV] parked");
+      if (justEntered) Serial.println("[NAV] parked");
       return;
   }
 }

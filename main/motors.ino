@@ -58,6 +58,18 @@ void encoderSetup() {
 // future swap to polling only needs a body change here.
 void updateEncoders() { }
 
+// Diagnostic print, rate-limited to ~5 Hz so the serial monitor stays readable.
+void readAndPrintEncoders() {
+  if (!showEncoders) return;
+  static unsigned long lastPrintMs = 0;
+  if (millis() - lastPrintMs < 200) return;
+  lastPrintMs = millis();
+  Serial.print("enc BL="); Serial.print(encBL);
+  Serial.print(" FL=");     Serial.print(encFL);
+  Serial.print(" BR=");     Serial.print(encBR);
+  Serial.print(" FR=");     Serial.println(encFR);
+}
+
 long leftTicks()     { return (encBL + encFL) / 2; }
 long rightTicks()    { return (encBR + encFR) / 2; }
 long straightTicks() { return (leftTicks() + rightTicks()) / 2; }
