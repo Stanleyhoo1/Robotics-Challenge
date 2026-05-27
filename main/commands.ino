@@ -28,6 +28,16 @@ void handleSerialCommands() {
   } else if (input.equalsIgnoreCase("c")) {
     runCalibration();
 
+  } else if (input.equalsIgnoreCase("nav")) {
+    useStateMachine = !useStateMachine;
+    if (useStateMachine) {
+      navState = NAV_ARENA_NAV;
+      Serial.println("State machine ENABLED → navState=NAV_ARENA_NAV");
+    } else {
+      navState = NAV_DISABLED;
+      Serial.println("State machine DISABLED → navState=NAV_DISABLED");
+    }
+
   } else if (input.startsWith("forward")) {
     int speed = FORWARD_SPEED;
     int spaceIdx = input.indexOf(' ');

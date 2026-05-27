@@ -4,17 +4,18 @@
 #include <Motoron.h>
 #include <LSM6.h>
 #include <kvstore_global_api.h>
+#include <MiniMessenger.h>
 #include "config.h"
+#include "globals.h"
 
 // ─────────────────────────────────────────
-// Display toggles (used across modules)
+// Global definitions (extern'd in globals.h)
 // ─────────────────────────────────────────
-bool showIR       = true;
-bool showDistance = true;
+bool showIR          = false;
+bool showDistance    = false;
+bool isEnabled       = false;
+bool useStateMachine = false;   // false = legacy junctionActions[] + rfidLoop path
 
-// =========================================
-// Setup
-// =========================================
 void setup() {
   Serial.begin(SERIAL_BAUD);
   uint32_t startWait = millis();
@@ -27,6 +28,7 @@ void setup() {
   rfidSetup();
   servoSetup();
   motorsSetup();
+  encoderSetup();
   wifiSetup();
 
   Serial.println("\nReady. Commands:");
@@ -41,30 +43,24 @@ void setup() {
   delay(1000);
 }
 
-// =========================================
-// Loop
-// =========================================
 void loop() {
-  wifiLoop();
+  // Encoder + heading updates first — they're cheap and the rest of the
+  // loop expects fresh tick counts and an integrated hop heading.
+  updateEncoders();
+  updateHopHeading();
 
+  wifiLoop();
   readAndPrintIR();
   readAndPrintDistance();
 
-  if (rfidLoop()) {
-    sweepTo(MAX_ANGLE, MIN_ANGLE);
-    sweepTo(MIN_ANGLE, MAX_ANGLE);
+  if (useStateMachine) {
+    // State machine owns motor + RFID control; legacy helpers stay out of the way.
+    navigationUpdate();
+  } else {
+    rfidLoop();
+    applyMotorEnabled();
   }
 
   handleSerialCommands();
-
-  // Motor output gated on server enable signal
-  if (isEnabled) {
-    motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(FORWARD_SPEED));
-    motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(FORWARD_SPEED));
-  } else {
-    motoron.setSpeedNow(LEFT_MOTOR,  0);
-    motoron.setSpeedNow(RIGHT_MOTOR, 0);
-  }
-
-  delay(20);
+  delay(10);
 }
