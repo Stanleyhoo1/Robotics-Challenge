@@ -159,6 +159,16 @@ void handleSerialCommands() {
     Serial.print("Encoder readings ");
     Serial.println(showEncoders ? "ON" : "OFF");
 
+  } else if (input.equalsIgnoreCase("ldr")) {
+    showLDR = !showLDR;
+    Serial.print("LDR readings ");
+    Serial.println(showLDR ? "ON" : "OFF");
+
+  } else if (input.equalsIgnoreCase("pitch")) {
+    showPitch = !showPitch;
+    Serial.print("Pitch readings ");
+    Serial.println(showPitch ? "ON" : "OFF");
+
   } else if (input.equalsIgnoreCase("encreset")) {
     encoderResetHop();
     Serial.println("Encoders zeroed.");
@@ -173,19 +183,35 @@ void handleSerialCommands() {
     Serial.print("  calibSamples    = "); Serial.println(calibSamples);
     Serial.print("  calibSum        = "); Serial.println(calibSum);
 
+  } else if (input.equalsIgnoreCase("recalib")) {
+    clearCalibKV();
+
+  } else if (input.equalsIgnoreCase("stop")) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    isEnabled = false;
+    Serial.println("Motors stopped, robot disabled. Press button or send 'nav' to re-engage.");
+
   } else if (input.equalsIgnoreCase("nav")) {
     useStateMachine = !useStateMachine;
     if (useStateMachine) {
-      navState = NAV_ARENA_NAV;
-      Serial.println("State machine ENABLED -> navState=NAV_ARENA_NAV");
+      navState = NAV_BASE_TO_FIRST_JUNCTION;
+      Serial.println("State machine ENABLED -> navState=NAV_BASE_TO_FIRST_JUNCTION (full base-exit sequence)");
     } else {
       navState = NAV_DISABLED;
       Serial.println("State machine DISABLED -> navState=NAV_DISABLED");
     }
 
+  } else if (input.equalsIgnoreCase("arena")) {
+    useStateMachine = true;
+    navState = NAV_ARENA_NAV;
+    Serial.println("State machine ENABLED -> navState=NAV_ARENA_NAV (skipped base sequence)");
+
   } else if (input.equalsIgnoreCase("state")) {
     Serial.println("── State dump ──");
-    Serial.print("  isEnabled          = "); Serial.println(isEnabled ? "true" : "false");
+    Serial.print("  isEnabled              = "); Serial.println(isEnabled ? "true" : "false");
+    Serial.print("  exitClearanceReceived  = "); Serial.println(exitClearanceReceived  ? "true" : "false");
+    Serial.print("  enterClearanceReceived = "); Serial.println(enterClearanceReceived ? "true" : "false");
     Serial.print("  useStateMachine    = "); Serial.println(useStateMachine ? "true" : "false");
     Serial.print("  navState           = "); Serial.println(navStateStr(navState));
     Serial.print("  robotPos           = ("); Serial.print(robotPos.row);
@@ -225,7 +251,7 @@ void handleSerialCommands() {
     int r, c;
     char stateChar;
     if (sscanf(input.c_str(), "tag %d %d %c", &r, &c, &stateChar) != 3) {
-      Serial.println("Usage: tag <row> <col> <u|f|i|p>");
+      Serial.println("Usage: tag <row> <col> <u|f|i|p|b>");
     } else if (r < 0 || r >= 9 || c < 0 || c >= 9) {
       Serial.println("Row/col must be 0..8");
     } else {
@@ -236,7 +262,8 @@ void handleSerialCommands() {
         case 'f': case 'F': s = TAG_FERTILE;   break;
         case 'i': case 'I': s = TAG_INFERTILE; break;
         case 'p': case 'P': s = TAG_PLANTED;   break;
-        default: Serial.println("State must be u/f/i/p"); ok = false; break;
+        case 'b': case 'B': s = TAG_BLOCKED;   break;
+        default: Serial.println("State must be u/f/i/p/b"); ok = false; break;
       }
       if (ok) {
         tagMap[r][c] = s;

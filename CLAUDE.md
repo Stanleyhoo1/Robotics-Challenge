@@ -11,16 +11,19 @@ All firmware lives in `main/` — a multi-file Arduino sketch (`.ino` + `.h`). W
 ## Competition layout
 
 ### Base (1.2 × 2.4 m, underground)
-- **Tunnel A** (red): entrance *into* base from arena, ≤20° ramp, ~1.2 m
-- **Tunnel B** (green): exit *from* base to arena
+- **Tunnel A** (red): exit *from* base to arena, ≤20° ramp, ~1.2 m. Surfaces at **Airlock A** = grid `(2, 8)` 0-indexed (`(3, 9)` 1-indexed).
+- **Tunnel B** (green): re-entry *from* arena to base. Surfaces at **Airlock B** = grid `(6, 8)` 0-indexed (`(7, 9)` 1-indexed).
 - Each tunnel is an **airlock** with two sets of doors — robot must wait for sequencing, cannot force them
 - Two RFID tags inside the base:
-  - **A** — driven over by *another robot* to open Airlock A's surface door (multi-robot coordination, handled server-side)
-  - **B** — robot sends its ID to request exit clearance via Tunnel B
+  - **A** — robot sends its ID to request exit clearance via Tunnel A
+  - **B** — driven over by *another robot* to open Tunnel B's surface door (multi-robot coordination, handled server-side)
+- Airlock positions are also defined in `config.h` as `AIRLOCK_A_ROW/COL` and `AIRLOCK_B_ROW/COL`. `robotPos` is seeded to Airlock A on the `WALL_FOLLOW → ARENA_NAV` transition so the planner has a starting cell before the first server-confirmed RFID fix.
 
 ### Main Arena (9×9 grid of RFID tags A1–I9)
-- **Left half (~columns A–E):** solid black lines connect holes → line-following works
-- **Right half (~columns F–I):** holes only, no lines → navigate by gyro heading + encoder ticks
+- **Line zone — bottom half, rows 5–9 (1-indexed) / rows 4–8 (0-indexed), all 9 columns:** solid black lines connect holes → line-following works
+- **No-line zone — top half, rows 1–4 (1-indexed) / rows 0–3 (0-indexed), all 9 columns:** holes only → navigate by gyro heading + encoder ticks
+- The split is **row-based, not column-based** (an earlier draft of this doc described it as left/right halves — that was wrong). Code constant: `LINE_ZONE_MIN_ROW = 4` in `config.h`.
+- Airlock A (arena entry) at row 2 is in the **no-line zone**; Airlock B (arena exit / return-to-base) at row 6 is in the **line zone**.
 - Grid spacing: **2.5 m across 9 tags → ~31.25 cm per cell** (8 gaps). Tune via physical measurement.
 - Tag fertile/infertile status is randomized at run start; robot must query the server per tag
 
@@ -34,17 +37,17 @@ All firmware lives in `main/` — a multi-file Arduino sketch (`.ino` + `.h`). W
 ## Navigation strategy
 
 ### Unified grid movement
-Robot always moves along grid lines (cardinal N/S/E/W between adjacent tags), on **both** halves. The *sensor* used differs by half, but path-planning and state-machine logic stay identical:
+Robot always moves along grid lines (cardinal N/S/E/W between adjacent tags), in **both** zones. The *sensor* used differs by zone, but path-planning and state-machine logic stay identical:
 
-- **Left half:** line sensor tracks the lane; RFID gives position fix on arrival
-- **Right half:** gyro heading-lock keeps a straight line; encoder ticks measure ~31 cm of travel; RFID gives position fix on arrival
+- **Line zone (rows 4–8):** line sensor tracks the lane; RFID gives position fix on arrival
+- **No-line zone (rows 0–3):** gyro heading-lock keeps a straight line; encoder ticks measure ~31 cm of travel; RFID gives position fix on arrival
 
 Free/diagonal movement is a future extension once grid nav is reliable.
 
 ### Position tracking
 - **Primary fix:** RFID coordinate on every successful scan resets estimated position to ground truth — kills accumulated drift
 - **Between-tag dead reckoning:** gyro (LSM6, already calibrated at boot) for heading lock + encoder ticks for distance. Best-effort only; the next RFID fix corrects any error
-- **Encoders:** ⚠️ hardware present (2 per side, 4 total), **software TODO** — no encoder code in `motors.ino` yet. Calibration plan below; until wired, right-half dead-reckoning falls back to timed runs at known speed
+- **Encoders:** ⚠️ hardware present (2 per side, 4 total), **software TODO** — no encoder code in `motors.ino` yet. Calibration plan below; until wired, no-line-zone dead-reckoning falls back to timed runs at known speed
 - **Missed reads:** if RFID fails on arrival, retry once in place, then continue. Log misses via `sendStatus()` for post-run debugging — don't stall
 
 ### Pathfinding (two separate concerns)
@@ -276,8 +279,8 @@ Over USB once `setup()` runs:
 
 ## Open design questions
 
-- **Right-half node arrival detection** (decide before implementing `ARENA_NAV` right-half logic): encoder tick count from last known tag, timed interval at known speed, or IR dip sensor. Encoder-based is most accurate once encoders are wired.
+- **No-line-zone node arrival detection** (decide before implementing `ARENA_NAV` no-line-zone logic): encoder tick count from last known tag, timed interval at known speed, or IR dip sensor. Encoder-based is most accurate once encoders are wired.
 - **Missed RFID reads:** retry once in place, then continue. Don't stall.
 - **Obstacle avoidance:** not in scope yet. If another robot blocks a cell, current A* has no obstacle model — adding a `BLOCKED` tag state and re-routing on forward-ultrasonic trigger is the planned extension.
-- **Free movement (future):** once grid nav is reliable, diagonal moves on the right half would reduce path length. Swap Manhattan heuristic for Euclidean and allow 8-directional movement.
+- **Free movement (future):** once grid nav is reliable, diagonal moves in the no-line zone would reduce path length. Swap Manhattan heuristic for Euclidean and allow 8-directional movement.
 - **Seed target selection refinement:** greedy nearest-unvisited is simple but may backtrack heavily — consider TSP-lite once enough fertile tags are discovered.

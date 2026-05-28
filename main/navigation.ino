@@ -12,6 +12,12 @@ bool  inJunction       = false;
 float currentKP        = KP;
 unsigned long junctionExitTime = 0;
 
+// Latched by readSensors() every IR poll: true when sum >= IR_MIN_LINE_SUM
+// (i.e. the array is sitting on a line). Consumed by updateLED in wifi.ino
+// to flip the status LED solid yellow while a line-follow state is active
+// but no line is currently under the array.
+bool lineCurrentlyDetected = false;
+
 // ─────────────────────────────────────────
 // Read all sensors into calibratedVals,
 // populate avg and sum by reference
@@ -26,6 +32,7 @@ void readSensors(uint16_t* calibratedVals, long& avg, long& sum) {
     avg += (long)val * (i * 1000);
     sum += val;
   }
+  lineCurrentlyDetected = (sum >= IR_MIN_LINE_SUM);
 }
 
 // ─────────────────────────────────────────
@@ -171,10 +178,13 @@ void followLine() {
   switch (state) {
     case LINE_NORMAL: {
       lastPosition   = avg / sum;
-      int error      = lastPosition - LINE_CENTER;
+      // Sensor 0 is mounted on the bot's RIGHT, sensor 8 on the LEFT (see
+      // spinUntilLine). Error is defined so line-on-right is POSITIVE → left
+      // wheel faster, right wheel slower → steers toward the line.
+      int error      = LINE_CENTER - (int)lastPosition;
       int correction = (int)(currentKP * error);
-      motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(constrain(BASE_SPEED + correction, -800, 800)));
-      motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(constrain(BASE_SPEED - correction, -800, 800)));
+      motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(constrain(BASE_SPEED + correction, LINE_FOLLOW_MIN_SPEED, 800)));
+      motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(constrain(BASE_SPEED - correction, LINE_FOLLOW_MIN_SPEED, 800)));
       break;
     }
     case LINE_LOST:
@@ -294,8 +304,7 @@ bool aStarNextStep(GridPos from, GridPos to, GridPos& next) {
       const int nr = cr + dr[d];
       const int nc = cc + dc[d];
       if (nr < 0 || nr >= 9 || nc < 0 || nc >= 9) continue;
-      // Future obstacle hook: when a TAG_BLOCKED state is added, skip the
-      // neighbour here (and clear it when the block lifts).
+      if (tagMap[nr][nc] == TAG_BLOCKED) continue;   // obstacle — route around
       const int nIdx = nr * 9 + nc;
       if (closed[nIdx]) continue;
 
@@ -364,7 +373,7 @@ bool selectNextTarget(GridPos from, GridPos& target) {
 // `tagMap` is defined further up alongside the helpers — keeping it adjacent
 // to selectNextTarget() since that's where it's primarily read.
 // ─────────────────────────────────────────
-NavState navState           = NAV_DISABLED;
+NavState navState           = NAV_BASE_TO_FIRST_JUNCTION;   // boot at start of base-exit; button press just enables it
 GridPos  robotPos           = { -1, -1 };
 GridPos  targetPos          = { -1, -1 };
 Facing   robotFacing        = NORTH;
@@ -374,7 +383,16 @@ int      pendingJunctionDir = 0;
 // File-local bookkeeping for the state machine.
 static GridPos       lastConfirmedPos = { -1, -1 };   // last RFID-confirmed cell, for calib
 static unsigned long atTagEnteredMs   = 0;            // for FERTILE_REPLY_TIMEOUT_MS
-static bool          rightHalfDriving = false;        // right-half hop in progress
+static bool          deadReckonDriving = false;       // no-line-zone hop in progress
+static bool          postTagIntentPlanting = false;   // NAV_POST_TAG_NUDGE: plant vs turn
+static bool          nudgeStarted          = false;   // NAV_POST_TAG_NUDGE: motors armed
+static bool          returning             = false;   // seeds exhausted → route to AIRLOCK_B
+static unsigned long clearanceRetryDeadlineMs = 0;     // resend open-airlock-X while waiting for clearance
+
+// Airlock B position as a GridPos — used in several arrival-check sites.
+static inline GridPos airlockBPos() {
+  return { (int8_t)AIRLOCK_B_ROW, (int8_t)AIRLOCK_B_COL };
+}
 
 // ─────────────────────────────────────────
 // Step robotPos one cell in robotFacing's direction.
@@ -391,48 +409,74 @@ static void advancePosOneCell() {
 // ─────────────────────────────────────────
 // Re-plan the next turn direction based on current tagMap state.
 // Sets targetPos and pendingJunctionDir as side effects.
+// In return mode (seeds exhausted), the target is fixed to AIRLOCK_B.
 // ─────────────────────────────────────────
 static void replanNextDir() {
   GridPos next;
-  if (!selectNextTarget(robotPos, targetPos)) {
+  if (returning) {
+    targetPos = airlockBPos();
+  } else if (!selectNextTarget(robotPos, targetPos)) {
     // No candidates remain — caller decides what to do (RETURN/PARKED).
     return;
   }
   if (aStarNextStep(robotPos, targetPos, next)) {
     const Facing want = facingToward(robotPos, next);
     pendingJunctionDir = getTurnDir(robotFacing, want);
-  }
-}
-
-// ─────────────────────────────────────────
-// Try to read an RFID tag at the current node. On success, kick off the
-// fertility query and transition to NAV_AT_TAG. On miss, re-plan.
-// ─────────────────────────────────────────
-static void tryRfidAtNode() {
-  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-    char uidStr[32] = "";
-    for (byte i = 0; i < rfid.uid.size; i++) {
-      char byteStr[3];
-      snprintf(byteStr, sizeof(byteStr), "%02X", rfid.uid.uidByte[i]);
-      strcat(uidStr, byteStr);
-    }
-    rfid.PICC_HaltA();
-
-    clearFertileResult();
-    sendIsFertile(uidStr);
-    navState       = NAV_AT_TAG;
-    atTagEnteredMs = millis();
   } else {
-    // Tag miss — continue planning toward the current target.
-    replanNextDir();
+    // from == to: we're at the target. Caller checks for return-arrival.
+    pendingJunctionDir = 0;
   }
 }
 
 // ─────────────────────────────────────────
-// NAV_ARENA_NAV tick: left half uses line-following + junction detection,
-// right half uses gyro heading-lock + encoder dead-reckoning.
+// Non-blocking RFID poll. Returns true and transitions to NAV_AT_TAG (after
+// kicking off the fertility query) if a tag was read. Returns false on miss
+// — caller keeps driving forward.
+// ─────────────────────────────────────────
+static bool pollRfidAndQueue() {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return false;
+
+  char uidStr[32] = "";
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    char byteStr[3];
+    snprintf(byteStr, sizeof(byteStr), "%02X", rfid.uid.uidByte[i]);
+    strcat(uidStr, byteStr);
+  }
+  rfid.PICC_HaltA();
+
+  clearFertileResult();
+  sendIsFertile(uidStr);
+  navState       = NAV_AT_TAG;
+  atTagEnteredMs = millis();
+  return true;
+}
+
+// Forward declaration — followLineBase is defined later in this file but
+// used here. Static functions in .ino files aren't reliably picked up by
+// Arduino's auto-prototype generator, so we declare it explicitly.
+static LineState followLineBase();
+
+// ─────────────────────────────────────────
+// NAV_ARENA_NAV tick: drive forward and poll RFID every tick. The RFID is
+// the position truth and the trigger for all decisions — line junctions are
+// not acted on here, they're just absorbed by the PID. On the line zone the
+// PID keeps us centred on the lane; in the no-line zone gyro heading-lock +
+// encoders carry us between cells with nearNextNode() as a miss-fallback.
 // ─────────────────────────────────────────
 static void navArenaTick() {
+  // Return-mode short-circuit: if we re-enter arena nav while already on
+  // Airlock B (e.g. post-plant at the airlock cell, or post-AT_TAG replan
+  // with no further step needed), hand off to the door handshake directly.
+  if (returning && robotPos.equals(airlockBPos())) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    deadReckonDriving = false;
+    endHopHeading();
+    Serial.println("[NAV] return-mode at Airlock B — handing off to NAV_AT_AIRLOCK_B");
+    navState = NAV_AT_AIRLOCK_B;
+    return;
+  }
+
   // Obstacle-avoidance trigger. Uses the cached forward reading (refreshed
   // at the top of main loop() each tick) so we don't double-ping the sensor.
   // The top-of-loop check handles forward < OBSTACLE_STOP_CM (8cm) by
@@ -442,7 +486,7 @@ static void navArenaTick() {
       lastForwardDistanceCm < (float)OBSTACLE_AVOID_CM) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
-    rightHalfDriving = false;
+    deadReckonDriving = false;
     endHopHeading();
     Serial.print("[NAV] obstacle at ");
     Serial.print(lastForwardDistanceCm);
@@ -451,32 +495,47 @@ static void navArenaTick() {
     return;
   }
 
-  if (robotPos.col <= LEFT_HALF_MAX_COL) {
-    // Left half — followLine() drives, handleJunction() sets junctionJustHandled.
-    followLine();
-    if (junctionJustHandled) {
-      junctionJustHandled = false;
-      advancePosOneCell();
-      tryRfidAtNode();
-    }
+  // RFID is the truth — poll every tick. On hit, stop and hand off to
+  // NAV_AT_TAG. The fertility reply will overwrite robotPos with ground truth.
+  if (pollRfidAndQueue()) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    deadReckonDriving = false;
+    endHopHeading();
+    return;
+  }
+
+  if (robotPos.row >= LINE_ZONE_MIN_ROW) {
+    // Line zone — PID only. Junction classification is ignored; the wide
+    // sensor coverage of a junction crossing averages back near LINE_CENTER
+    // so the robot drives straight through. RFID detection ends the hop.
+    (void)followLineBase();
   } else {
-    // Right half — no line, so dead-reckon one cell at a time.
-    if (!rightHalfDriving) {
+    // No-line zone — gyro heading-lock + encoders. nearNextNode() is a
+    // miss-fallback: if we've travelled a full cell without an RFID hit,
+    // stop, advance the dead-reckoned position, log it, and start the next
+    // hop. The next tick's RFID poll will pick up the next tag.
+    if (!deadReckonDriving) {
       encoderResetHop();
       resetHopHeading();
       motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
       motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
-      rightHalfDriving = true;
+      deadReckonDriving = true;
     } else {
-      // updateHopHeading() is now called from main loop(); just consume its result.
       applyHeadingCorrection();
       if (nearNextNode()) {
         motoron.setSpeedNow(LEFT_MOTOR,  0);
         motoron.setSpeedNow(RIGHT_MOTOR, 0);
-        rightHalfDriving = false;
+        deadReckonDriving = false;
         endHopHeading();
         advancePosOneCell();
-        tryRfidAtNode();
+        sendStatus("rfid_miss_dead_reckon_advance");
+        // Return-mode dead-reckon arrival at Airlock B (RFID never read).
+        if (returning && robotPos.equals(airlockBPos())) {
+          Serial.println("[NAV] dead-reckon arrival at Airlock B");
+          navState = NAV_AT_AIRLOCK_B;
+          return;
+        }
       }
     }
   }
@@ -509,11 +568,33 @@ static void navAtTagTick() {
       lastConfirmedPos = newPos;
     }
 
+    // Return-mode arrival check: if we're at Airlock B with seeds exhausted,
+    // skip the planting decision entirely and start the door handshake.
+    if (returning && robotPos.equals(airlockBPos())) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      Serial.println("[SM] return-mode arrival at Airlock B");
+      navState = NAV_AT_AIRLOCK_B;
+      return;
+    }
+
     if (fertileResult.fertile && !fertileResult.planted && seedsRemaining > 0) {
-      navState = NAV_PLANTING;
+      // Nudge forward so the seed dispenser sits over the hole, then plant.
+      postTagIntentPlanting = true;
+      nudgeStarted          = false;
+      navState              = NAV_POST_TAG_NUDGE;
     } else {
+      // No plant — ask the planner where we're going next. Straight means
+      // keep driving forward without a nudge; a turn means nudge forward to
+      // centre the pivot, then rotate.
       replanNextDir();
-      navState = NAV_ARENA_NAV;
+      if (pendingJunctionDir == 0) {
+        navState = NAV_ARENA_NAV;
+      } else {
+        postTagIntentPlanting = false;
+        nudgeStarted          = false;
+        navState              = NAV_POST_TAG_NUDGE;
+      }
     }
   } else if (millis() - atTagEnteredMs > FERTILE_REPLY_TIMEOUT_MS) {
     Serial.println("[SM] isFertileReply timed out — resuming arena nav.");
@@ -522,7 +603,52 @@ static void navAtTagTick() {
 }
 
 // ─────────────────────────────────────────
+// NAV_POST_TAG_NUDGE tick: drive forward POST_TAG_FORWARD_CM using the
+// encoder hop counter, then dispatch by intent. Planting → NAV_PLANTING;
+// turning → in-place turnDegrees + back to NAV_ARENA_NAV. The nudge uses
+// the same encoder/ticksPerCm path as a full hop, so it falls back to
+// TICKS_PER_CM_FALLBACK before calibration locks.
+// ─────────────────────────────────────────
+static void navPostTagNudgeTick() {
+  if (!nudgeStarted) {
+    encoderResetHop();
+    motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+    motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+    nudgeStarted = true;
+    return;
+  }
+
+  if (hopDistanceCm() < POST_TAG_FORWARD_CM) return;
+
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  nudgeStarted = false;
+
+  if (postTagIntentPlanting) {
+    navState = NAV_PLANTING;
+    return;
+  }
+
+  // Turn intent — rotate in place to face the replanned step direction,
+  // then hand off to NAV_ARENA_NAV so the next hop begins immediately.
+  if (pendingJunctionDir != 0) {
+    Serial.print("[NUDGE] turning ");
+    Serial.print(pendingJunctionDir * 90);
+    Serial.println(" degrees");
+    turnDegrees((float)pendingJunctionDir * 90.0f);
+    wifiLoop();
+    if (!isEnabled) { handleNavDisable(); return; }
+    robotFacing        = facingAfterTurn(robotFacing, pendingJunctionDir);
+    pendingJunctionDir = 0;
+  }
+  navState = NAV_ARENA_NAV;
+}
+
+// ─────────────────────────────────────────
 // NAV_PLANTING tick: blocking sweep, report, decrement, transition.
+// Robot is already nudged POST_TAG_FORWARD_CM past the tag when we land
+// here, so any turn the planner requests next can happen in place — no
+// second nudge needed before rotating.
 // ─────────────────────────────────────────
 static void navPlantingTick() {
   sweepTo(MAX_ANGLE, MIN_ANGLE);
@@ -537,12 +663,24 @@ static void navPlantingTick() {
   Serial.println(seedsRemaining);
 
   if (seedsRemaining == 0) {
-    // TODO: extend with return-to-base routing (tunnel A entrance, etc.).
-    navState = NAV_PARKED;
-  } else {
-    replanNextDir();
-    navState = NAV_ARENA_NAV;
+    Serial.println("[PLANT] seeds exhausted — entering return mode, target = Airlock B");
+    returning = true;
+    // Fall through to the replan/turn path below; replanNextDir routes to
+    // AIRLOCK_B when `returning` is true.
   }
+
+  replanNextDir();
+  if (pendingJunctionDir != 0) {
+    Serial.print("[PLANT] turning ");
+    Serial.print(pendingJunctionDir * 90);
+    Serial.println(" degrees toward next target");
+    turnDegrees((float)pendingJunctionDir * 90.0f);
+    wifiLoop();
+    if (!isEnabled) { handleNavDisable(); return; }
+    robotFacing        = facingAfterTurn(robotFacing, pendingJunctionDir);
+    pendingJunctionDir = 0;
+  }
+  navState = NAV_ARENA_NAV;
 }
 
 // ─────────────────────────────────────────
@@ -551,12 +689,17 @@ static void navPlantingTick() {
 // Idempotent — safe to call every tick while disabled.
 // ─────────────────────────────────────────
 void handleNavDisable() {
-  if (navState != NAV_DISABLED) {
-    Serial.println("[NAV] disabled (isEnabled=false) — holding");
-    navState         = NAV_DISABLED;
-    rightHalfDriving = false;
-    endHopHeading();
+  // navState is intentionally preserved — re-enable resumes whatever state
+  // was active before. Only mid-hop / mid-turn bookkeeping that would go
+  // stale gets cleared, so the state's next tick starts cleanly.
+  static NavState printedFor = (NavState)255;
+  if (printedFor != navState) {
+    Serial.print("[NAV] disabled (isEnabled=false) — holding state=");
+    Serial.println(navStateStr(navState));
+    printedFor = navState;
   }
+  deadReckonDriving = false;
+  endHopHeading();
 }
 
 // ─────────────────────────────────────────
@@ -564,14 +707,28 @@ void handleNavDisable() {
 // ─────────────────────────────────────────
 const char* navStateStr(NavState s) {
   switch (s) {
-    case NAV_DISABLED:       return "NAV_DISABLED";
-    case NAV_LINE_FOLLOW:    return "NAV_LINE_FOLLOW";
-    case NAV_ARENA_NAV:      return "NAV_ARENA_NAV";
-    case NAV_AT_TAG:         return "NAV_AT_TAG";
-    case NAV_PLANTING:       return "NAV_PLANTING";
-    case NAV_WALL_FOLLOW:    return "NAV_WALL_FOLLOW";
-    case NAV_AVOID_OBSTACLE: return "NAV_AVOID_OBSTACLE";
-    case NAV_PARKED:         return "NAV_PARKED";
+    case NAV_DISABLED:                  return "NAV_DISABLED";
+    case NAV_LINE_FOLLOW:               return "NAV_LINE_FOLLOW";
+    case NAV_BASE_TO_FIRST_JUNCTION:    return "NAV_BASE_TO_FIRST_JUNCTION";
+    case NAV_BASE_FIRST_TURN:           return "NAV_BASE_FIRST_TURN";
+    case NAV_BASE_TO_TAG:               return "NAV_BASE_TO_TAG";
+    case NAV_WAIT_EXIT_CLEARANCE:       return "NAV_WAIT_EXIT_CLEARANCE";
+    case NAV_BASE_TO_SECOND_JUNCTION:   return "NAV_BASE_TO_SECOND_JUNCTION";
+    case NAV_BASE_SECOND_TURN:          return "NAV_BASE_SECOND_TURN";
+    case NAV_BASE_TO_LINE_LOST:         return "NAV_BASE_TO_LINE_LOST";
+    case NAV_BASE_LINE_LOST_PAUSE:      return "NAV_BASE_LINE_LOST_PAUSE";
+    case NAV_BASE_FORWARD_NUDGE:        return "NAV_BASE_FORWARD_NUDGE";
+    case NAV_ARENA_NAV:                 return "NAV_ARENA_NAV";
+    case NAV_AT_TAG:                    return "NAV_AT_TAG";
+    case NAV_POST_TAG_NUDGE:            return "NAV_POST_TAG_NUDGE";
+    case NAV_PLANTING:                  return "NAV_PLANTING";
+    case NAV_WALL_FOLLOW:               return "NAV_WALL_FOLLOW";
+    case NAV_AVOID_OBSTACLE:            return "NAV_AVOID_OBSTACLE";
+    case NAV_AT_AIRLOCK_B:              return "NAV_AT_AIRLOCK_B";
+    case NAV_WAIT_ENTER_CLEARANCE:      return "NAV_WAIT_ENTER_CLEARANCE";
+    case NAV_TUNNEL_B_WALL_FOLLOW:      return "NAV_TUNNEL_B_WALL_FOLLOW";
+    case NAV_BASE_RETURN:               return "NAV_BASE_RETURN";
+    case NAV_PARKED:                    return "NAV_PARKED";
   }
   return "?";
 }
@@ -586,94 +743,115 @@ const char* facingStr(Facing f) {
   return "?";
 }
 
+// Short human-readable description of what the robot is currently *doing* in
+// each navState. Printed once per state entry by the dispatcher so the serial
+// log reads as a play-by-play instead of just a list of enum names.
+const char* navActivityStr(NavState s) {
+  switch (s) {
+    case NAV_DISABLED:                  return "stopped (disabled)";
+    case NAV_LINE_FOLLOW:               return "line-following (legacy test mode)";
+    case NAV_BASE_TO_FIRST_JUNCTION:    return "following line toward first junction";
+    case NAV_BASE_FIRST_TURN:           return "turning at first junction";
+    case NAV_BASE_TO_TAG:               return "following line toward RFID tag";
+    case NAV_WAIT_EXIT_CLEARANCE:       return "holding for exitClearance";
+    case NAV_BASE_TO_SECOND_JUNCTION:   return "following line toward T-junction";
+    case NAV_BASE_SECOND_TURN:          return "turning at T-junction";
+    case NAV_BASE_TO_LINE_LOST:         return "following line until it ends";
+    case NAV_BASE_LINE_LOST_PAUSE:      return "paused (LED yellow) — line lost in base";
+    case NAV_BASE_FORWARD_NUDGE:        return "driving forward into tunnel mouth";
+    case NAV_ARENA_NAV:                 return "arena nav — driving toward next tag";
+    case NAV_AT_TAG:                    return "at RFID tag — waiting for fertility reply";
+    case NAV_POST_TAG_NUDGE:            return "slight forward to centre on hole";
+    case NAV_PLANTING:                  return "planting seed";
+    case NAV_WALL_FOLLOW:               return "wall-following through tunnel A";
+    case NAV_AVOID_OBSTACLE:            return "marking obstacle + replanning";
+    case NAV_AT_AIRLOCK_B:              return "at Airlock B — rotating + opening door";
+    case NAV_WAIT_ENTER_CLEARANCE:      return "holding for enterClearance";
+    case NAV_TUNNEL_B_WALL_FOLLOW:      return "wall-following through tunnel B";
+    case NAV_BASE_RETURN:               return "line-following back into base";
+    case NAV_PARKED:                    return "parked";
+  }
+  return "?";
+}
+
 const char* tagStateStr(TagState s) {
   switch (s) {
     case TAG_UNKNOWN:   return "UNKNOWN";
     case TAG_FERTILE:   return "FERTILE";
     case TAG_INFERTILE: return "INFERTILE";
     case TAG_PLANTED:   return "PLANTED";
+    case TAG_BLOCKED:   return "BLOCKED";
   }
   return "?";
 }
 
 // ─────────────────────────────────────────
-// Between-step abort check for NAV_AVOID_OBSTACLE. Called between blocking
-// turn/drive calls. Services wifi so the heartbeat survives the ~3s
-// maneuver, then aborts to NAV_DISABLED on either disable or a real
-// collision-range forward reading.
-// Returns true when the caller should bail out of the maneuver.
+// NAV_AVOID_OBSTACLE: mark the obstructed cell, replan, turn in place to
+// face the new step direction, hand control back to NAV_ARENA_NAV. The
+// A* planner already skips TAG_BLOCKED cells, so the replan naturally
+// detours around the obstacle.
+//
+// This is a one-tick maneuver: one blocking turnDegrees call + transition.
+// Heartbeat survives because the turn takes ~1s (well under the 1s
+// HEARTBEAT_TIMEOUT_MS budget once you allow for the post-turn wifiLoop).
 // ─────────────────────────────────────────
-static bool avoidStepAbort() {
-  wifiLoop();   // keep heartbeat / LED alive during the blocking sequence
+static void navAvoidObstacleTick() {
+  // The blocked cell is the one immediately forward of robotPos in the
+  // current heading. If we're off-grid (robotPos at the edge facing out),
+  // skip the mark — there's no in-grid cell to flag.
+  GridPos blocked = robotPos;
+  switch (robotFacing) {
+    case NORTH: blocked.row--; break;
+    case SOUTH: blocked.row++; break;
+    case EAST:  blocked.col++; break;
+    case WEST:  blocked.col--; break;
+  }
+
+  if (blocked.valid()) {
+    tagMap[blocked.row][blocked.col] = TAG_BLOCKED;
+    Serial.print("[AVOID] marked (");
+    Serial.print(blocked.row);
+    Serial.print(",");
+    Serial.print(blocked.col);
+    Serial.println(") as TAG_BLOCKED");
+  } else {
+    Serial.println("[AVOID] obstacle off-grid — skipping tagMap update");
+  }
+
+  // Replan from current robotPos. selectNextTarget skips TAG_BLOCKED
+  // automatically (falls into the default `continue` branch); aStarNextStep
+  // skips it as a neighbour. So the new pendingJunctionDir naturally detours.
+  replanNextDir();
+
+  if (pendingJunctionDir == 0) {
+    // Either replan failed (no candidates left) or the new step happens to
+    // be the same direction we're facing — which shouldn't happen now that
+    // the cell directly ahead is marked blocked. Fall through to ARENA_NAV
+    // and let the state machine handle "no targets" later.
+    Serial.println("[AVOID] no detour direction available — handing back to NAV_ARENA_NAV");
+    navState = NAV_ARENA_NAV;
+    return;
+  }
+
+  // Turn in place to face the replanned direction. pendingJunctionDir is
+  // -1 (left), +1 (right), or +2 (uturn) — turnDegrees handles all three.
+  Serial.print("[AVOID] turning ");
+  Serial.print(pendingJunctionDir * 90);
+  Serial.println(" degrees toward new step");
+  turnDegrees((float)pendingJunctionDir * 90.0f);
+
+  // Service wifi after the blocking turn so the heartbeat refreshes; bail
+  // out cleanly if the operator killed us during the turn.
+  wifiLoop();
   if (!isEnabled) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
     handleNavDisable();
-    Serial.println("[AVOID] aborting — robot disabled mid-maneuver");
-    return true;
+    return;
   }
-  const float fwd = getDistanceCM(SENSOR_FORWARD);
-  if (fwd >= 0.0f && fwd < (float)OBSTACLE_STOP_CM) {
-    motoron.setSpeedNow(LEFT_MOTOR,  0);
-    motoron.setSpeedNow(RIGHT_MOTOR, 0);
-    navState = NAV_DISABLED;
-    Serial.print("[AVOID] aborting — forward at ");
-    Serial.print(fwd);
-    Serial.println(" cm");
-    return true;
-  }
-  return false;
-}
 
-// ─────────────────────────────────────────
-// NAV_AVOID_OBSTACLE: simple fixed sidestep around a forward obstacle.
-// Runs the whole sequence in one tick (turnDegrees + moveForward are
-// blocking by design). Step 5 is a literal interpretation of the spec —
-// after step 3 the robot is already at original heading, so step 5 is a
-// turnDegrees(0) no-op; this keeps cardinal orientation correct for the
-// state machine's heading tracking. If you want a true U-shape detour
-// (return to original lane), add a sidestep-back drive between steps 4
-// and 5 and change step 5 to turn opposite direction of step 1.
-// ─────────────────────────────────────────
-static void navAvoidObstacleTick() {
-  const float leftDist  = getDistanceCM(SENSOR_LEFT);
-  const float rightDist = getDistanceCM(SENSOR_RIGHT);
-
-  // Direction: +1 = right (CW), -1 = left (CCW). Prefer the side that's
-  // out of range (open space); on ties or both valid, pick the larger.
-  int dir;
-  if      (leftDist  < 0 && rightDist < 0) dir = +1;
-  else if (leftDist  < 0)                  dir = -1;
-  else if (rightDist < 0)                  dir = +1;
-  else                                     dir = (rightDist > leftDist) ? +1 : -1;
-
-  Serial.print("[AVOID] sidestepping ");
-  Serial.print(dir > 0 ? "right" : "left");
-  Serial.print(" (L="); Serial.print(leftDist);
-  Serial.print(" R=");  Serial.print(rightDist);
-  Serial.println(")");
-
-  // Step 1: turn 90° toward the more-clear side.
-  turnDegrees(dir * 90.0f);
-  if (avoidStepAbort()) return;
-
-  // Step 2: sidestep.
-  moveForward(OBSTACLE_SIDESTEP_MS);
-  if (avoidStepAbort()) return;
-
-  // Step 3: turn 90° back toward original heading.
-  turnDegrees(-dir * 90.0f);
-  if (avoidStepAbort()) return;
-
-  // Step 4: drive past the obstacle.
-  moveForward(OBSTACLE_FORWARD_MS);
-  if (avoidStepAbort()) return;
-
-  // Step 5: per spec — "turn 90° to restore original heading". Robot is
-  // already at original heading after step 3, so this is a no-op. Keeping
-  // the call (with 0°) documents the spec literally.
-  turnDegrees(0);
-  if (avoidStepAbort()) return;
+  robotFacing = facingAfterTurn(robotFacing, pendingJunctionDir);
+  pendingJunctionDir = 0;   // consumed in-place; the line-follower has nothing to do
 
   Serial.println("[AVOID] done — returning to NAV_ARENA_NAV");
   navState = NAV_ARENA_NAV;
@@ -691,15 +869,39 @@ void wallFollow() {
   static float rightBuf[5] = { -1, -1, -1, -1, -1 };
   static int   wallIdx     = 0;
 
-  // Exit check first — uses the cached forward reading from this tick's
-  // top-of-loop obstacle check, so no extra ultrasonic ping here.
-  if (lastForwardDistanceCm >= 0.0f &&
-      lastForwardDistanceCm < (float)WALL_FORWARD_CLEAR_CM) {
-    motoron.setSpeedNow(LEFT_MOTOR,  0);
-    motoron.setSpeedNow(RIGHT_MOTOR, 0);
-    Serial.println("tunnel exit detected");
-    navState = NAV_ARENA_NAV;
-    return;
+  // Exit check: IR sees a line — we're in the arena. The door-wait case
+  // (forward < OBSTACLE_STOP_CM) is handled by the top-of-loop pause in
+  // main.ino, which simply skips this function until the door opens; from
+  // wallFollow's perspective, nothing special needs to be done.
+  {
+    uint16_t calibratedVals[IR_SENSOR_COUNT];
+    long avg, sum;
+    readSensors(calibratedVals, avg, sum);
+    if (sum >= IR_MIN_LINE_SUM) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      if (navState == NAV_TUNNEL_B_WALL_FOLLOW) {
+        // Return path: just popped into base — hand off to line-follow.
+        Serial.println("[WALL_B] line detected — entering NAV_BASE_RETURN");
+        navState = NAV_BASE_RETURN;
+      } else {
+        // Exit path (NAV_WALL_FOLLOW): Tunnel A drops us at Airlock A. Seed
+        // robotPos + robotFacing so the planner has a starting cell on arena
+        // entry — the first RFID read (via the server's isFertileReply in
+        // navAtTagTick) will overwrite robotPos with ground truth.
+        if (!robotPos.valid()) {
+          robotPos    = { (int8_t)AIRLOCK_A_ROW, (int8_t)AIRLOCK_A_COL };
+          robotFacing = (Facing)ARENA_ENTRY_FACING_INT;
+          Serial.print("[WALL] seeded robotPos to Airlock A (");
+          Serial.print(robotPos.row); Serial.print(", ");
+          Serial.print(robotPos.col); Serial.print("), facing ");
+          Serial.println(facingStr(robotFacing));
+        }
+        Serial.println("[WALL] line detected — entering NAV_ARENA_NAV");
+        navState = NAV_ARENA_NAV;
+      }
+      return;
+    }
   }
 
   // Sample LEFT and RIGHT once per tick into the circular buffer.
@@ -740,6 +942,410 @@ void wallFollow() {
 }
 
 // ─────────────────────────────────────────
+// Base-exit helpers + state ticks.
+//
+// Flow (set in motion by the `nav` serial command):
+//   BASE_TO_FIRST_JUNCTION  → follow line, watch for any junction classification
+//   BASE_FIRST_TURN         → blocking turnDegrees, exit-side turn
+//   BASE_TO_TAG             → follow line, watch for RFID; tag triggers
+//                             sendOpenAirlockA + transition
+//   BASE_TO_SECOND_JUNCTION → follow line, watch for any junction
+//   BASE_SECOND_TURN        → blocking turnDegrees, opposite of first turn
+//   BASE_TO_LINE_LOST       → follow line, watch for LINE_LOST
+//   BASE_FORWARD_NUDGE      → drive forward BASE_FORWARD_NUDGE_MS into tunnel
+//   NAV_WALL_FOLLOW         → wall-follow until IR detects a line (arena)
+//
+// 90° line corners are tolerated by skipping handleJunction here — the
+// inline PID below corrects through gentle curves; sharp 90° corners still
+// risk losing the line and may need a dedicated handler later.
+// ─────────────────────────────────────────
+
+// PID-only line follow with no junction handling. Caller inspects the
+// returned LineState to decide whether to keep going, turn, or stop.
+static LineState followLineBase() {
+  uint16_t calibratedVals[IR_SENSOR_COUNT];
+  long avg = 0, sum = 0;
+  readSensors(calibratedVals, avg, sum);
+
+  if (sum >= IR_MIN_LINE_SUM) {
+    lastPosition       = avg / sum;
+    // Sensor 0 is mounted on the bot's RIGHT, sensor 8 on the LEFT (see
+    // spinUntilLine). Error is defined so line-on-right is POSITIVE → left
+    // wheel faster, right wheel slower → steers toward the line.
+    const int error      = LINE_CENTER - (int)lastPosition;
+    const int correction = (int)(KP * (float)error);
+    motoron.setSpeedNow(LEFT_MOTOR,
+      scaleSpeed(constrain(BASE_SPEED + correction, LINE_FOLLOW_MIN_SPEED, 800)));
+    motoron.setSpeedNow(RIGHT_MOTOR,
+      scaleSpeed(constrain(BASE_SPEED - correction, LINE_FOLLOW_MIN_SPEED, 800)));
+  } else {
+    // No line under the array — stop instead of drifting on the last
+    // commanded PWM. The caller decides what comes next (pause state,
+    // tunnel transition, replan, etc.) by inspecting the returned LineState.
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  }
+  return getLineState(calibratedVals, sum);
+}
+
+// One-shot RFID read. Fills uidOut and returns true if a tag was present.
+static bool readRfidNonBlocking(char* uidOut, size_t uidOutSize) {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return false;
+  uidOut[0] = '\0';
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    char b[3];
+    snprintf(b, sizeof(b), "%02X", rfid.uid.uidByte[i]);
+    if (strlen(uidOut) + strlen(b) < uidOutSize) strcat(uidOut, b);
+  }
+  rfid.PICC_HaltA();
+  return true;
+}
+
+static bool isJunctionState(LineState ls) {
+  return ls == LINE_JUNCTION_LEFT
+      || ls == LINE_JUNCTION_RIGHT
+      || ls == LINE_JUNCTION_BOTH;
+}
+
+// Blocking pre-turn nudge + turn + brief post-turn forward nudge. Keeps the
+// heartbeat alive across both motions and bails cleanly if the operator
+// disables mid-sequence.
+//
+// Pre-turn nudge mirrors NAV_POST_TAG_NUDGE in the arena: drive forward
+// POST_TAG_FORWARD_CM via the encoder hop counter so the wheel axis (= turn
+// pivot) sits over the junction crossing before rotating. Post-turn nudge
+// re-engages the line on the new branch since followLineBase holds motors at
+// zero until it actually sees a line.
+static bool baseTurnBlocking(float deg) {
+  Serial.print("[BASE] pre-turn nudge ");
+  Serial.print(POST_TAG_FORWARD_CM);
+  Serial.println(" cm to centre on junction");
+  encoderResetHop();
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+  while (hopDistanceCm() < POST_TAG_FORWARD_CM) {
+    wifiLoop();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      handleNavDisable();
+      return false;
+    }
+    delay(5);
+  }
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+
+  turnDegrees(deg);
+  wifiLoop();
+  if (!isEnabled) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    handleNavDisable();
+    return false;
+  }
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+  delay(JUNCTION_NUDGE_MS);
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  return true;
+}
+
+// Spin in `direction` (-1=left, +1=right) up to `maxDeg` watching for line.
+// Returns true if the line is acquired (motors stopped on the line), false
+// on max rotation or operator disable. Heartbeat stays alive via wifiLoop.
+static bool sweepForLine(int direction, float maxDeg) {
+  int spinLeft  = (direction == -1) ? -BASE_SPEED :  BASE_SPEED;
+  int spinRight = (direction == -1) ?  BASE_SPEED : -BASE_SPEED;
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(spinLeft));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(spinRight));
+
+  float accumulated = 0.0f;
+  unsigned long lastTime = micros();
+
+  while (fabsf(accumulated) < maxDeg) {
+    imu.read();
+    unsigned long now = micros();
+    float dt = (now - lastTime) / 1000000.0f;
+    lastTime = now;
+    accumulated += -((imu.g.z - gyroZOffset) * GYRO_SENS) * dt;
+
+    uint16_t cv[IR_SENSOR_COUNT];
+    long avg, sum;
+    readSensors(cv, avg, sum);
+    if (sum >= IR_MIN_LINE_SUM) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      return true;
+    }
+
+    wifiLoop();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      handleNavDisable();
+      return false;
+    }
+    delay(5);
+  }
+
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  return false;
+}
+
+// Blocking recovery for unexpected line loss in the base. Nudges forward
+// POST_TAG_FORWARD_CM (same distance as junction pre-turn and planting), then
+// sweeps left 90°, then right 180° (so ±90° from start), watching for the
+// line. Returns true if the line is acquired at any point; the caller's
+// followLineBase will resume PID on the next tick.
+static bool baseLineLostRecovery() {
+  Serial.print("[RECOVER] forward ");
+  Serial.print(POST_TAG_FORWARD_CM);
+  Serial.println(" cm then ±90° sweep");
+
+  encoderResetHop();
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+  while (hopDistanceCm() < POST_TAG_FORWARD_CM) {
+    wifiLoop();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      handleNavDisable();
+      return false;
+    }
+    delay(5);
+  }
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+
+  // Did the nudge alone land us back on the line?
+  {
+    uint16_t cv[IR_SENSOR_COUNT];
+    long avg, sum;
+    readSensors(cv, avg, sum);
+    if (sum >= IR_MIN_LINE_SUM) {
+      Serial.println("[RECOVER] line re-acquired after forward nudge");
+      return true;
+    }
+  }
+
+  if (sweepForLine(-1, 90.0f)) {
+    Serial.println("[RECOVER] line acquired on left sweep");
+    return true;
+  }
+  if (!isEnabled) return false;
+  if (sweepForLine(+1, 180.0f)) {
+    Serial.println("[RECOVER] line acquired on right sweep");
+    return true;
+  }
+  if (!isEnabled) return false;
+  // Re-centre to roughly the original heading so the bot's mental model and
+  // the visible orientation match. Best-effort — return value is ignored.
+  sweepForLine(-1, 90.0f);
+
+  Serial.println("[RECOVER] line not found in ±90° sweep");
+  return false;
+}
+
+// Common LINE_LOST handler for unexpected-loss states in the base: run the
+// recovery routine; on failure, send status + park so the operator can
+// intervene rather than thrashing forever.
+static void handleBaseUnexpectedLineLoss() {
+  if (!baseLineLostRecovery()) {
+    sendStatus("base_recovery_failed");
+    navState = NAV_PARKED;
+  }
+}
+
+static void navBaseToFirstJunctionTick() {
+  LineState ls = followLineBase();
+  if (isJunctionState(ls)) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.println("[BASE] first junction reached");
+    navState = NAV_BASE_FIRST_TURN;
+  } else if (ls == LINE_LOST) {
+    handleBaseUnexpectedLineLoss();
+  }
+}
+
+static void navBaseFirstTurnTick() {
+  Serial.print("[BASE] first turn ");
+  Serial.print(BASE_FIRST_TURN_DEG);
+  Serial.println(" deg");
+  if (!baseTurnBlocking(BASE_FIRST_TURN_DEG)) return;
+  navState = NAV_BASE_TO_TAG;
+}
+
+static void navBaseToTagTick() {
+  // Keep the line PID running (line may have 90° bends here).
+  LineState ls = followLineBase();
+
+  char uid[32];
+  if (readRfidNonBlocking(uid, sizeof(uid))) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.print("[BASE] tag detected: ");
+    Serial.println(uid);
+    Serial.println("[BASE] sending openAirlockA — waiting for exitClearance before continuing");
+    sendOpenAirlockA();
+    clearanceRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
+    navState = NAV_WAIT_EXIT_CLEARANCE;
+    return;
+  }
+
+  if (ls == LINE_LOST) {
+    handleBaseUnexpectedLineLoss();
+  }
+}
+
+static void navBaseToSecondJunctionTick() {
+  LineState ls = followLineBase();
+  if (isJunctionState(ls)) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.println("[BASE] second (T) junction reached");
+    navState = NAV_BASE_SECOND_TURN;
+  } else if (ls == LINE_LOST) {
+    handleBaseUnexpectedLineLoss();
+  }
+}
+
+static void navBaseSecondTurnTick() {
+  Serial.print("[BASE] second turn ");
+  Serial.print(BASE_SECOND_TURN_DEG);
+  Serial.println(" deg");
+  if (!baseTurnBlocking(BASE_SECOND_TURN_DEG)) return;
+  navState = NAV_BASE_TO_LINE_LOST;
+}
+
+static void navBaseToLineLostTick() {
+  LineState ls = followLineBase();
+  if (ls == LINE_LOST) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.println("[BASE] line lost — pausing with yellow LED");
+    navState = NAV_BASE_LINE_LOST_PAUSE;
+  }
+}
+
+// Stop in place for BASE_LINE_LOST_PAUSE_MS, leaving updateLED() to flip the
+// status LED solid yellow on the navState match. Then hand off to the forward
+// nudge + wall-follow that probes for the next line / tunnel mouth.
+static void navBaseLineLostPauseTick() {
+  static unsigned long pauseStartMs = 0;
+  if (pauseStartMs == 0) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    pauseStartMs = millis();
+    return;
+  }
+  if (millis() - pauseStartMs >= BASE_LINE_LOST_PAUSE_MS) {
+    pauseStartMs = 0;
+    navState = NAV_BASE_FORWARD_NUDGE;
+  }
+}
+
+static void navBaseForwardNudgeTick() {
+  Serial.print("[BASE] forward nudge ");
+  Serial.print(BASE_FORWARD_NUDGE_MS);
+  Serial.println(" ms then wall-follow");
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+  delay(BASE_FORWARD_NUDGE_MS);
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  wifiLoop();
+  if (!isEnabled) { handleNavDisable(); return; }
+  navState = NAV_WALL_FOLLOW;
+}
+
+// ─────────────────────────────────────────
+// NAV_AT_AIRLOCK_B: arrived at the return airlock. Rotate to face the base
+// (180° from arena-entry direction), send openAirlockB, hand off to
+// NAV_TUNNEL_B_WALL_FOLLOW. The door is initially closed: forward ultrasonic
+// will read < OBSTACLE_STOP_CM and main.ino's top-of-loop will pause motors
+// + retry the open request until the door opens.
+// ─────────────────────────────────────────
+static void navAtAirlockBTick() {
+  const Facing baseDir = (Facing)((ARENA_ENTRY_FACING_INT + 2) % 4);
+  const int turnDir = getTurnDir(robotFacing, baseDir);
+  if (turnDir != 0) {
+    Serial.print("[AIRLOCK_B] rotating ");
+    Serial.print(turnDir * 90);
+    Serial.print(" deg to face base (");
+    Serial.print(facingStr(baseDir));
+    Serial.println(")");
+    turnDegrees((float)turnDir * 90.0f);
+    wifiLoop();
+    if (!isEnabled) { handleNavDisable(); return; }
+    robotFacing = baseDir;
+  }
+  Serial.println("[AIRLOCK_B] sending openAirlockB — waiting for enterClearance before wall-follow");
+  sendOpenAirlockB();
+  clearanceRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
+  navState = NAV_WAIT_ENTER_CLEARANCE;
+}
+
+// ─────────────────────────────────────────
+// Wait-for-clearance ticks. After sending an open-airlock-X request the robot
+// holds still until the server replies with the matching clearance message
+// (set by onMessage in wifi.ino). If no clearance arrives within
+// DOOR_RETRY_INTERVAL_MS the request is resent — covers a dropped first
+// request. Motors are held at zero throughout.
+// ─────────────────────────────────────────
+static void navWaitExitClearanceTick() {
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  wifiPoll();
+  if (exitClearanceReceived) {
+    Serial.println("[BASE] exitClearance received — continuing to second junction");
+    navState = NAV_BASE_TO_SECOND_JUNCTION;
+    return;
+  }
+  if (millis() >= clearanceRetryDeadlineMs) {
+    Serial.println("[BASE] no exitClearance yet — resending openAirlockA");
+    sendOpenAirlockA();
+    clearanceRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
+  }
+}
+
+static void navWaitEnterClearanceTick() {
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  wifiPoll();
+  if (enterClearanceReceived) {
+    Serial.println("[AIRLOCK_B] enterClearance received — entering tunnel wall-follow");
+    navState = NAV_TUNNEL_B_WALL_FOLLOW;
+    return;
+  }
+  if (millis() >= clearanceRetryDeadlineMs) {
+    Serial.println("[AIRLOCK_B] no enterClearance yet — resending openAirlockB");
+    sendOpenAirlockB();
+    clearanceRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
+  }
+}
+
+// ─────────────────────────────────────────
+// NAV_BASE_RETURN: line-follow back into the base from the tunnel mouth.
+// Run ends on LINE_LOST (line ran out) or a forward obstacle (handled by
+// main.ino's obstacle gate which flips us to NAV_PARKED).
+// ─────────────────────────────────────────
+static void navBaseReturnTick() {
+  LineState ls = followLineBase();
+  if (ls == LINE_LOST) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.println("[BASE_RETURN] line ended — parking");
+    sendStatus("parked_line_end");
+    navState = NAV_PARKED;
+  }
+}
+
+// ─────────────────────────────────────────
 // Top-level dispatcher. Called from main loop() when useStateMachine is true
 // AND isEnabled is true — main.ino owns the disable side now.
 // ─────────────────────────────────────────
@@ -752,17 +1358,20 @@ void navigationUpdate() {
     return;
   }
 
-  // Re-enable: drop back into arena nav so the planner re-evaluates from the
-  // last known robotPos. If you want manual re-engagement instead, remove
-  // this block — `nav` from the serial console can still wake the robot up.
-  if (navState == NAV_DISABLED) {
-    Serial.println("[NAV] re-enabled → NAV_ARENA_NAV");
-    navState = NAV_ARENA_NAV;
-  }
+  // Re-enable: navState is whatever it was before the pause — the dispatcher
+  // below will run that state's tick directly. To bootstrap from scratch use
+  // `nav` (sets NAV_BASE_TO_FIRST_JUNCTION) or `arena` (sets NAV_ARENA_NAV)
+  // over serial.
 
   // Stub-state prints fire once per entry, not every tick.
   static NavState lastTickState = (NavState)255;
   const bool justEntered = (lastTickState != navState);
+  if (justEntered) {
+    Serial.print("[NAV] -> ");
+    Serial.print(navStateStr(navState));
+    Serial.print(" :: ");
+    Serial.println(navActivityStr(navState));
+  }
   lastTickState = navState;
 
   switch (navState) {
@@ -777,6 +1386,42 @@ void navigationUpdate() {
       followLine();
       return;
 
+    case NAV_BASE_TO_FIRST_JUNCTION:
+      navBaseToFirstJunctionTick();
+      return;
+
+    case NAV_BASE_FIRST_TURN:
+      navBaseFirstTurnTick();
+      return;
+
+    case NAV_BASE_TO_TAG:
+      navBaseToTagTick();
+      return;
+
+    case NAV_WAIT_EXIT_CLEARANCE:
+      navWaitExitClearanceTick();
+      return;
+
+    case NAV_BASE_TO_SECOND_JUNCTION:
+      navBaseToSecondJunctionTick();
+      return;
+
+    case NAV_BASE_SECOND_TURN:
+      navBaseSecondTurnTick();
+      return;
+
+    case NAV_BASE_TO_LINE_LOST:
+      navBaseToLineLostTick();
+      return;
+
+    case NAV_BASE_LINE_LOST_PAUSE:
+      navBaseLineLostPauseTick();
+      return;
+
+    case NAV_BASE_FORWARD_NUDGE:
+      navBaseForwardNudgeTick();
+      return;
+
     case NAV_ARENA_NAV:
       navArenaTick();
       return;
@@ -785,24 +1430,41 @@ void navigationUpdate() {
       navAtTagTick();
       return;
 
+    case NAV_POST_TAG_NUDGE:
+      navPostTagNudgeTick();
+      return;
+
     case NAV_PLANTING:
       navPlantingTick();
       return;
 
     case NAV_AVOID_OBSTACLE:
-      if (justEntered) Serial.println("[NAV] avoid-obstacle active");
       navAvoidObstacleTick();
       return;
 
     case NAV_WALL_FOLLOW:
-      if (justEntered) Serial.println("[NAV] wall-follow active");
       wallFollow();
+      return;
+
+    case NAV_AT_AIRLOCK_B:
+      navAtAirlockBTick();
+      return;
+
+    case NAV_WAIT_ENTER_CLEARANCE:
+      navWaitEnterClearanceTick();
+      return;
+
+    case NAV_TUNNEL_B_WALL_FOLLOW:
+      wallFollow();
+      return;
+
+    case NAV_BASE_RETURN:
+      navBaseReturnTick();
       return;
 
     case NAV_PARKED:
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
-      if (justEntered) Serial.println("[NAV] parked");
       return;
   }
 }

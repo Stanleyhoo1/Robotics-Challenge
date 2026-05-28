@@ -6,57 +6,69 @@ MotoronI2C motoron(MOTORON_ADDRESS, &Wire1);
 float gyroZOffset = 0;
 
 // ─────────────────────────────────────────
-// Encoders (quadrature, interrupt-driven on Giga)
+// Encoders (quadrature, one per rear wheel, interrupt-driven on Giga).
+// Back-left  uses pins 22/23. Back-right uses pins 24/25.
 // ─────────────────────────────────────────
 volatile long encBL = 0;
-volatile long encFL = 0;
 volatile long encBR = 0;
-volatile long encFR = 0;
 
 static volatile bool lastBL_A = false, lastBL_B = false;
-static volatile bool lastFL_A = false, lastFL_B = false;
 static volatile bool lastBR_A = false, lastBR_B = false;
-static volatile bool lastFR_A = false, lastFR_B = false;
 
 // Quadrature decoders: one ISR per channel. A-edge sign is the inverse of
 // B-edge sign for the same direction — that's what gives 4x decoding.
-static void isr_BL_A() { bool a = digitalRead(ENC_BL_A), b = digitalRead(ENC_BL_B); if (a != lastBL_A) { encBL += (a == b) ? -1 :  1; lastBL_A = a; } }
-static void isr_BL_B() { bool a = digitalRead(ENC_BL_A), b = digitalRead(ENC_BL_B); if (b != lastBL_B) { encBL += (a == b) ?  1 : -1; lastBL_B = b; } }
-static void isr_FL_A() { bool a = digitalRead(ENC_FL_A), b = digitalRead(ENC_FL_B); if (a != lastFL_A) { encFL += (a == b) ? -1 :  1; lastFL_A = a; } }
-static void isr_FL_B() { bool a = digitalRead(ENC_FL_A), b = digitalRead(ENC_FL_B); if (b != lastFL_B) { encFL += (a == b) ?  1 : -1; lastFL_B = b; } }
+static void isr_BL_A() { bool a = digitalRead(ENC_BL_A), b = digitalRead(ENC_BL_B); if (a != lastBL_A) { encBL += (a == b) ?  1 : -1; lastBL_A = a; } }
+static void isr_BL_B() { bool a = digitalRead(ENC_BL_A), b = digitalRead(ENC_BL_B); if (b != lastBL_B) { encBL += (a == b) ? -1 :  1; lastBL_B = b; } }
 static void isr_BR_A() { bool a = digitalRead(ENC_BR_A), b = digitalRead(ENC_BR_B); if (a != lastBR_A) { encBR += (a == b) ? -1 :  1; lastBR_A = a; } }
 static void isr_BR_B() { bool a = digitalRead(ENC_BR_A), b = digitalRead(ENC_BR_B); if (b != lastBR_B) { encBR += (a == b) ?  1 : -1; lastBR_B = b; } }
-static void isr_FR_A() { bool a = digitalRead(ENC_FR_A), b = digitalRead(ENC_FR_B); if (a != lastFR_A) { encFR += (a == b) ? -1 :  1; lastFR_A = a; } }
-static void isr_FR_B() { bool a = digitalRead(ENC_FR_A), b = digitalRead(ENC_FR_B); if (b != lastFR_B) { encFR += (a == b) ?  1 : -1; lastFR_B = b; } }
 
 void encoderSetup() {
   pinMode(ENC_BL_A, INPUT_PULLUP); pinMode(ENC_BL_B, INPUT_PULLUP);
-  pinMode(ENC_FL_A, INPUT_PULLUP); pinMode(ENC_FL_B, INPUT_PULLUP);
   pinMode(ENC_BR_A, INPUT_PULLUP); pinMode(ENC_BR_B, INPUT_PULLUP);
-  pinMode(ENC_FR_A, INPUT_PULLUP); pinMode(ENC_FR_B, INPUT_PULLUP);
 
   // Seed last-state from current pin reads so the first edge isn't misread.
   lastBL_A = digitalRead(ENC_BL_A); lastBL_B = digitalRead(ENC_BL_B);
-  lastFL_A = digitalRead(ENC_FL_A); lastFL_B = digitalRead(ENC_FL_B);
   lastBR_A = digitalRead(ENC_BR_A); lastBR_B = digitalRead(ENC_BR_B);
-  lastFR_A = digitalRead(ENC_FR_A); lastFR_B = digitalRead(ENC_FR_B);
 
   attachInterrupt(digitalPinToInterrupt(ENC_BL_A), isr_BL_A, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_BL_B), isr_BL_B, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_FL_A), isr_FL_A, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_FL_B), isr_FL_B, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_BR_A), isr_BR_A, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_BR_B), isr_BR_B, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_FR_A), isr_FR_A, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENC_FR_B), isr_FR_B, CHANGE);
 
-  Serial.println("Encoders ready (interrupt-driven, 4x quadrature).");
+  Serial.println("Encoders ready (interrupt-driven, 4x quadrature, 1 per side).");
+
+  // Restore previously-locked ticks/cm if we have one saved. If not, the
+  // in-run calibration path takes over and saves on lock.
+  if (!loadCalibFromKV()) {
+    Serial.print("No saved encoder calib; using fallback ticks_per_cm=");
+    Serial.println(calibTicksPerCm);
+  }
 }
 
 // No-op under the current interrupt-driven encoder design — counters are
 // updated by ISRs. Kept so the main-loop call site is uniform and so a
 // future swap to polling only needs a body change here.
 void updateEncoders() { }
+
+// Pitch debug print — used to identify which accelerometer axis points
+// forward on this build so the ramp feed-forward picks the right axis & sign.
+// Prints both possible pitch computations; whichever swings most on a ramp
+// is the forward axis. ±sign on the ramp tells us the sign convention.
+void readAndPrintPitch() {
+  if (!showPitch) return;
+  static unsigned long lastPrintMs = 0;
+  if (millis() - lastPrintMs < 200) return;
+  lastPrintMs = millis();
+  imu.read();
+  float pitchX = atan2((float)imu.a.x, (float)imu.a.z) * RAD_TO_DEG;
+  float pitchY = atan2((float)imu.a.y, (float)imu.a.z) * RAD_TO_DEG;
+  Serial.print("accel ax="); Serial.print(imu.a.x);
+  Serial.print(" ay=");      Serial.print(imu.a.y);
+  Serial.print(" az=");      Serial.print(imu.a.z);
+  Serial.print("  pitchX="); Serial.print(pitchX, 1);
+  Serial.print("deg pitchY="); Serial.print(pitchY, 1);
+  Serial.println("deg");
+}
 
 // Diagnostic print, rate-limited to ~5 Hz so the serial monitor stays readable.
 void readAndPrintEncoders() {
@@ -65,18 +77,16 @@ void readAndPrintEncoders() {
   if (millis() - lastPrintMs < 200) return;
   lastPrintMs = millis();
   Serial.print("enc BL="); Serial.print(encBL);
-  Serial.print(" FL=");     Serial.print(encFL);
-  Serial.print(" BR=");     Serial.print(encBR);
-  Serial.print(" FR=");     Serial.println(encFR);
+  Serial.print(" BR=");    Serial.println(encBR);
 }
 
-long leftTicks()     { return (encBL + encFL) / 2; }
-long rightTicks()    { return (encBR + encFR) / 2; }
+long leftTicks()     { return encBL; }
+long rightTicks()    { return encBR; }
 long straightTicks() { return (leftTicks() + rightTicks()) / 2; }
 
 void encoderResetHop() {
   noInterrupts();
-  encBL = encFL = encBR = encFR = 0;
+  encBL = encBR = 0;
   interrupts();
 }
 
@@ -88,6 +98,59 @@ float calibTicksPerCm = TICKS_PER_CM_FALLBACK;
 bool  calibLocked     = false;
 int   calibSamples    = 0;
 float calibSum        = 0;
+
+static const char* CALIB_KV_KEY = "/kv/calib_tpc";
+
+// Persist the locked ticks/cm so the robot doesn't recalibrate from scratch
+// on every boot. Mirrors the IR sensor's kvstore pattern in ir_sensor.ino.
+void saveCalibToKV() {
+  int rc = kv_set(CALIB_KV_KEY, &calibTicksPerCm, sizeof(calibTicksPerCm), 0);
+  if (rc == 0) {
+    Serial.print("Encoder calib saved to KV: ticks_per_cm=");
+    Serial.println(calibTicksPerCm);
+  } else {
+    Serial.print("Encoder calib KV save FAILED, rc=");
+    Serial.println(rc);
+  }
+}
+
+// Try to restore a previously-locked value. Returns true on success and sets
+// calibTicksPerCm + calibLocked. Sanity-checks the loaded value so a corrupt
+// KV entry falls back to the in-run calibration path instead of poisoning
+// dead reckoning with garbage.
+bool loadCalibFromKV() {
+  float    saved;
+  size_t   actualSize = 0;
+  int rc = kv_get(CALIB_KV_KEY, &saved, sizeof(saved), &actualSize);
+  if (rc != 0)                    return false;
+  if (actualSize != sizeof(float)) return false;
+  if (saved < 0.1f || saved > 1000.0f) {
+    Serial.print("Encoder calib KV entry out of range (");
+    Serial.print(saved);
+    Serial.println("); ignoring.");
+    return false;
+  }
+  calibTicksPerCm = saved;
+  calibLocked     = true;
+  Serial.print("Encoder calib loaded from KV: ticks_per_cm=");
+  Serial.println(calibTicksPerCm);
+  return true;
+}
+
+// Erase the saved value and reset the accumulator so the next run
+// recalibrates from scratch. Used by the `recalib` serial command.
+void clearCalibKV() {
+  int rc = kv_remove(CALIB_KV_KEY);
+  calibLocked     = false;
+  calibSamples    = 0;
+  calibSum        = 0.0f;
+  calibTicksPerCm = TICKS_PER_CM_FALLBACK;
+  Serial.print("Encoder calib reset (KV rc=");
+  Serial.print(rc);
+  Serial.print(", in-memory ticks_per_cm=");
+  Serial.print(calibTicksPerCm);
+  Serial.println(")");
+}
 
 float hopDistanceCm() {
   return (float)straightTicks() / calibTicksPerCm;
@@ -123,6 +186,7 @@ void calibRecordHop(GridPos prev, GridPos curr) {
     char msg[64];
     snprintf(msg, sizeof(msg), "calib_locked ticks_per_cm=%.3f", calibTicksPerCm);
     sendStatus(msg);
+    saveCalibToKV();
   }
 }
 
@@ -188,7 +252,7 @@ void turnDegrees(float targetDegrees) {
 }
 
 // ─────────────────────────────────────────
-// Hop-heading correction for right-half dead-reckoning.
+// Hop-heading correction for no-line-zone dead-reckoning.
 // Mirrors the gyro-integration math in turnDegrees() but accumulates
 // into a hop-relative heading and feeds a proportional motor correction.
 // ─────────────────────────────────────────

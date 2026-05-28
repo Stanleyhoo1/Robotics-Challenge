@@ -23,6 +23,8 @@
 extern bool  showIR;
 extern bool  showDistance;
 extern bool  showEncoders;
+extern bool  showPitch;
+extern bool  showLDR;
 extern bool  isEnabled;
 extern bool  useStateMachine;
 extern float lastForwardDistanceCm;   // updated by the obstacle check each tick
@@ -32,9 +34,7 @@ extern MotoronI2C motoron;
 extern LSM6       imu;
 extern float      gyroZOffset;
 extern volatile long encBL;
-extern volatile long encFL;
 extern volatile long encBR;
-extern volatile long encFR;
 extern float calibTicksPerCm;
 extern bool  calibLocked;
 extern int   calibSamples;
@@ -52,6 +52,8 @@ extern MFRC522_I2C rfid;
 // ── wifi.ino ─────────────────────────────
 extern FertileResult fertileResult;
 extern MiniMessenger messenger;
+extern bool          exitClearanceReceived;   // set true by onMessage on type=exitClearance
+extern bool          enterClearanceReceived;  // set true by onMessage on type=enterClearance
 
 // ── navigation.ino ───────────────────────
 extern NavState  navState;
@@ -61,3 +63,4 @@ extern GridPos   targetPos;
 extern Facing    robotFacing;
 extern int       seedsRemaining;
 extern int       pendingJunctionDir;
+extern bool      lineCurrentlyDetected;   // updated by readSensors; consumed by updateLED

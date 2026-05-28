@@ -14,8 +14,10 @@
 bool  showIR               = false;
 bool  showDistance         = false;
 bool  showEncoders         = false;
+bool  showPitch            = false;
+bool  showLDR              = false;
 bool  isEnabled            = false;
-bool  useStateMachine      = false;   // false = legacy junctionActions[] + rfidLoop path
+bool  useStateMachine      = true;    // state machine drives behavior; set false to fall back to legacy rfidLoop + applyMotorEnabled
 float lastForwardDistanceCm = 0.0f;   // refreshed by the obstacle check at top of loop()
 
 void setup() {
@@ -32,6 +34,10 @@ void setup() {
   motorsSetup();
   encoderSetup();
   wifiSetup();
+
+  pinMode(POWER_BUTTON,    INPUT_PULLUP);
+  pinMode(REVIVE_BUTTON_1, INPUT_PULLUP);
+  pinMode(REVIVE_BUTTON_2, INPUT_PULLUP);
 
   Serial.println("\nReady. Commands:");
   Serial.println("  <number>            → turn that many degrees");
@@ -52,6 +58,27 @@ void setup() {
   delay(1000);
 }
 
+// Power button: poll the pin every tick, toggle isEnabled on each press
+// (HIGH→LOW edge). 200 ms cooldown prevents bounce-induced double-toggle.
+static void checkPowerButton() {
+  static unsigned long lastPressMs = 0;
+  static bool wasPressed = false;
+  const bool pressedNow = (digitalRead(POWER_BUTTON) == LOW);
+
+  if (pressedNow && !wasPressed && (millis() - lastPressMs > 200)) {
+    isEnabled = !isEnabled;
+    lastPressMs = millis();
+    // Give the heartbeat timeout a fresh baseline so the wifi safety check
+    // doesn't immediately undo the toggle (only relevant once heartbeats
+    // have started arriving).
+    extern unsigned long lastHeartbeatMs;
+    if (lastHeartbeatMs != 0) lastHeartbeatMs = millis();
+    Serial.print(">>> Power button — isEnabled now ");
+    Serial.println(isEnabled ? "true" : "false");
+  }
+  wasPressed = pressedNow;
+}
+
 void loop() {
   // ── Forward obstacle / door check ─────────────────────────────────────
   // Every tick: if forward sensor sees something within OBSTACLE_STOP_CM,
@@ -59,15 +86,58 @@ void loop() {
   // (door opens → distance jumps above the threshold). Status is sent
   // exactly once per rising edge so the server can run its door handshake.
   // navState is NOT modified — the state machine just pauses for the tick.
-  static bool prevObstacle = false;
+  static bool prevObstacle    = false;   // previous tick's stable state
+  static bool prevRawObstacle = false;   // previous tick's raw reading
+  static bool stableObstacle  = false;   // debounced state used downstream
 
   const float distFwd     = getDistanceCM(SENSOR_FORWARD);
   lastForwardDistanceCm   = distFwd;
-  const bool  obstacleNow = (distFwd >= 0.0f) && (distFwd < (float)OBSTACLE_STOP_CM);
+  const bool  rawObstacle = (distFwd >= 0.0f) && (distFwd < (float)OBSTACLE_STOP_CM);
+
+  // 2-consecutive-readings debounce: a single-tick HC-SR04 flicker (OOR
+  // glitch, off-axis echo) won't flip the gate. Only when the raw reading
+  // disagrees with our stable state for two ticks in a row do we accept it.
+  if (rawObstacle != stableObstacle && rawObstacle == prevRawObstacle) {
+    stableObstacle = rawObstacle;
+  }
+  prevRawObstacle = rawObstacle;
+  const bool obstacleNow = stableObstacle;
 
   if (obstacleNow && !prevObstacle) {
     sendStatus("obstacle_stop");
+    Serial.println(">>> obstacle in front — holding");
   }
+  if (!obstacleNow && prevObstacle) {
+    // Door opened / robot moved / object cleared. Body resumes on this same
+    // tick — the state machine's current tick re-commands motor speeds.
+    sendStatus("obstacle_cleared");
+    Serial.println(">>> obstacle cleared — resuming");
+  }
+
+  // Door-retry: if we're stuck at a closed door in either wall-follow phase,
+  // resend the open-airlock request every DOOR_RETRY_INTERVAL_MS. The
+  // baseline is set on the first paused tick so the server gets a quiet
+  // window after the original request before any resend. Airlock A = exit
+  // (NAV_WALL_FOLLOW), Airlock B = return (NAV_TUNNEL_B_WALL_FOLLOW).
+  static unsigned long doorRetryDeadlineMs = 0;
+  const bool atClosedDoor = obstacleNow &&
+    (navState == NAV_WALL_FOLLOW || navState == NAV_TUNNEL_B_WALL_FOLLOW);
+  if (atClosedDoor) {
+    if (!prevObstacle) {
+      doorRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
+    }
+    if (millis() >= doorRetryDeadlineMs) {
+      if (navState == NAV_WALL_FOLLOW) {
+        Serial.println("[BASE] door still closed — resending openAirlockA");
+        sendOpenAirlockA();
+      } else {
+        Serial.println("[BASE] door still closed — resending openAirlockB");
+        sendOpenAirlockB();
+      }
+      doorRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
+    }
+  }
+
   prevObstacle = obstacleNow;
 
   // ── Always-run pass ───────────────────────────────────────────────────
@@ -76,12 +146,15 @@ void loop() {
   // passive (no motor activity) and useful for bench-testing without the
   // server.
   wifiLoop();
+  checkPowerButton();
   handleSerialCommands();
   updateEncoders();
   updateHopHeading();           // no-ops when no hop is active
   readAndPrintIR();
   readAndPrintDistance();
   readAndPrintEncoders();
+  readAndPrintPitch();
+  readAndPrintLDR();
 
   // ── Safety gate ───────────────────────────────────────────────────────
   // Skip the body when disabled OR while an obstacle is in front. The
@@ -99,6 +172,13 @@ void loop() {
   if (obstacleNow) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    // Base-return termination: hitting something in front while line-following
+    // in the base ends the run (per the spec: "follow it until no more line or
+    // we detect something in front and can't move").
+    if (useStateMachine && navState == NAV_BASE_RETURN) {
+      sendStatus("parked_obstacle");
+      navState = NAV_PARKED;
+    }
     delay(10);
     return;
   }

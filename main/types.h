@@ -67,7 +67,8 @@ enum TagState : uint8_t {
   TAG_UNKNOWN,
   TAG_FERTILE,
   TAG_INFERTILE,
-  TAG_PLANTED
+  TAG_PLANTED,
+  TAG_BLOCKED      // cell contains an obstacle / other robot — A* routes around it
 };
 
 // ─────────────────────────────────────────
@@ -77,10 +78,27 @@ enum TagState : uint8_t {
 enum NavState : uint8_t {
   NAV_DISABLED,
   NAV_LINE_FOLLOW,
+  // Base-exit sequence (in order)
+  NAV_BASE_TO_FIRST_JUNCTION,    // line-follow until first intersection
+  NAV_BASE_FIRST_TURN,           // turn right (exit case)
+  NAV_BASE_TO_TAG,               // line-follow until RFID tag detected
+  NAV_WAIT_EXIT_CLEARANCE,       // exitRequest sent at base tag, wait for server clearance
+  NAV_BASE_TO_SECOND_JUNCTION,   // exitClearance received, line-follow to T-junction
+  NAV_BASE_SECOND_TURN,          // turn opposite direction of first turn
+  NAV_BASE_TO_LINE_LOST,         // line-follow until LINE_LOST
+  NAV_BASE_LINE_LOST_PAUSE,      // momentary stop with yellow LED after losing line
+  NAV_BASE_FORWARD_NUDGE,        // brief forward drive, then wall-follow tunnel
+  // Arena states
   NAV_ARENA_NAV,
   NAV_AT_TAG,
+  NAV_POST_TAG_NUDGE,    // forward nudge after RFID hit, before turn or plant
   NAV_PLANTING,
   NAV_WALL_FOLLOW,
   NAV_AVOID_OBSTACLE,
+  // Return sequence (arena → base via Airlock B)
+  NAV_AT_AIRLOCK_B,              // rotate to face base, send openAirlockB
+  NAV_WAIT_ENTER_CLEARANCE,      // enterRequest sent at airlock B, wait for server clearance
+  NAV_TUNNEL_B_WALL_FOLLOW,      // wall-follow down tunnel B (mirrors NAV_WALL_FOLLOW)
+  NAV_BASE_RETURN,               // line-follow inside base until LINE_LOST or obstacle
   NAV_PARKED
 };

@@ -7,6 +7,13 @@
 // FertileResult struct defined in types.h
 FertileResult fertileResult = {false, false, false, "", 0, 0};
 
+// Server-side clearance acks. Reset on each open-request send, set true on
+// receipt of the corresponding clearance message. Currently used for
+// verification / debugging only — the door-open signal that actually drives
+// the state machine is the forward ultrasonic going back above OBSTACLE_STOP_CM.
+bool exitClearanceReceived  = false;
+bool enterClearanceReceived = false;
+
 MiniMessenger messenger;
 const char* BoardId = BOARD_ID;
 unsigned long lastHeartbeatMs = 0;
@@ -22,20 +29,46 @@ void clearFertileResult() {
 unsigned long lastBlinkMs = 0;
 bool blinkState           = false;
 
-void setLED(int r, int g, int b) {
+void setLED(int r, int g) {
   digitalWrite(LED_R, r);
   digitalWrite(LED_G, g);
-  digitalWrite(LED_B, b);
+}
+
+// Which nav states are actively trying to line-follow. Used by updateLED to
+// decide whether "no line under array" should be surfaced as yellow.
+static bool isLineFollowState(NavState s) {
+  return s == NAV_LINE_FOLLOW
+      || s == NAV_BASE_TO_FIRST_JUNCTION
+      || s == NAV_BASE_TO_TAG
+      || s == NAV_BASE_TO_SECOND_JUNCTION
+      || s == NAV_BASE_TO_LINE_LOST
+      || s == NAV_BASE_LINE_LOST_PAUSE
+      || s == NAV_BASE_RETURN;
 }
 
 void updateLED() {
+  // Revive button held: override everything else, show solid green.
+  // Released → falls through to the red / yellow logic below.
+  if (digitalRead(REVIVE_BUTTON_1) == LOW || digitalRead(REVIVE_BUTTON_2) == LOW) {
+    setLED(LOW, HIGH);
+    return;
+  }
+
+  // Yellow whenever we're in a line-follow state but the IR array isn't
+  // sitting on a line — latches on the moment the line is lost, releases as
+  // soon as readSensors sees the line again.
+  if (isLineFollowState(navState) && !lineCurrentlyDetected) {
+    setLED(HIGH, HIGH);
+    return;
+  }
+
   if (isEnabled) {
-    setLED(HIGH, LOW, LOW);
+    setLED(HIGH, LOW);                      // solid red while running
   } else {
     if (millis() - lastBlinkMs > LED_BLINK_INTERVAL_MS) {
       lastBlinkMs = millis();
       blinkState = !blinkState;
-      setLED(blinkState ? HIGH : LOW, LOW, LOW);
+      setLED(blinkState ? HIGH : LOW, LOW); // blink red while disabled
     }
   }
 }
@@ -85,6 +118,16 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
   if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) {
     if (isEnabled) Serial.println(">>> DISABLED (emergency/disable)");
     isEnabled = false;
+  }
+
+  if (strstr(msg, "type=exitClearance")) {
+    exitClearanceReceived = true;
+    Serial.println(">>> exitClearance");
+  }
+
+  if (strstr(msg, "type=enterClearance")) {
+    enterClearanceReceived = true;
+    Serial.println(">>> enterClearance");
   }
 
   if (strstr(msg, "type=isFertileReply")) {
@@ -144,14 +187,31 @@ void sendStatus(const char* status) {
   wifiSend(msg);
 }
 
+// Airlock open requests. A = exit base, B = enter base.
+// Server responds by opening the gates; we detect the door opening via the
+// forward ultrasonic reading going back above OBSTACLE_STOP_CM (no clearance
+// message handled here).
+void sendOpenAirlockA() {
+  exitClearanceReceived = false;
+  char msg[64];
+  snprintf(msg, sizeof(msg), "type=openAirlockA board_id=%s", BoardId);
+  wifiSend(msg);
+}
+
+void sendOpenAirlockB() {
+  enterClearanceReceived = false;
+  char msg[64];
+  snprintf(msg, sizeof(msg), "type=openAirlockB board_id=%s", BoardId);
+  wifiSend(msg);
+}
+
 // ─────────────────────────────────────────
 // Setup / Loop
 // ─────────────────────────────────────────
 void wifiSetup() {
   pinMode(LED_R, OUTPUT);
   pinMode(LED_G, OUTPUT);
-  pinMode(LED_B, OUTPUT);
-  setLED(LOW, LOW, LOW);
+  setLED(LOW, LOW);   // off at boot; first wifiLoop tick will pick up blinking-disabled
 
   messenger.onMessage(onMessage);
   messenger.begin(WIFI_SSID, WIFI_PASSWORD, BROKER_HOST, BROKER_PORT, GROUP_ID, BoardId);
@@ -166,7 +226,12 @@ void wifiLoop() {
   messenger.loop();
   updateLED();
 
-  if (isEnabled && millis() - lastHeartbeatMs > HEARTBEAT_TIMEOUT_MS) {
+  // Heartbeat-timeout safety only kicks in after we've heard at least one
+  // heartbeat. Before that (e.g. bench-testing without a server), the button
+  // / serial commands are authoritative; if the server has never talked to
+  // us, we have no "lost contact" condition to react to.
+  if (lastHeartbeatMs != 0 && isEnabled &&
+      millis() - lastHeartbeatMs > HEARTBEAT_TIMEOUT_MS) {
     isEnabled = false;
     Serial.println(">>> DISABLED (heartbeat timeout)");
   }

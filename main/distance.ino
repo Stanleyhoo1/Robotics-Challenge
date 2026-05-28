@@ -67,7 +67,9 @@ void printDistance(DistanceSensor sensor) {
 // ─────────────────────────────────────────
 void readAndPrintDistance() {
   if (!showDistance) return;
-  for (int i = 0; i < SENSOR_COUNT; i++) {
-    printDistance((DistanceSensor)i);
-  }
+  // Reuse the cached forward reading from main.ino's top-of-loop obstacle
+  // check — saves a redundant ~30 ms ultrasonic ping per tick.
+  Serial.print("Forward: ");
+  if (lastForwardDistanceCm < 0) Serial.println("OOR");
+  else { Serial.print(lastForwardDistanceCm); Serial.println(" cm"); }
 }

@@ -20,8 +20,8 @@ void setup() {
 
   Serial.println("Going forward...");
 
-  motoron.setSpeedNow(1, 700);
-  motoron.setSpeedNow(2, 700);
+  motoron.setSpeedNow(1, -400);
+  motoron.setSpeedNow(2, -400);
 
   delay(3000);
 
@@ -32,6 +32,6 @@ void setup() {
 }
 
 void loop() {
-  motoron.setSpeedNow(1, 700);
-  motoron.setSpeedNow(2, 700);
+  motoron.setSpeedNow(1, -800);
+  motoron.setSpeedNow(2, 800);
 }

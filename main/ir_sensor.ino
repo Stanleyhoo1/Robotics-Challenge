@@ -80,6 +80,16 @@ void runCalibration() {
   Serial.println("--- CALIBRATION COMPLETE ---");
 }
 
+// LDR diagnostic print, rate-limited to ~5 Hz.
+void readAndPrintLDR() {
+  if (!showLDR) return;
+  static unsigned long lastPrintMs = 0;
+  if (millis() - lastPrintMs < 200) return;
+  lastPrintMs = millis();
+  Serial.print("LDR=");
+  Serial.println(analogRead(LDR_PIN));
+}
+
 void readAndPrintIR() {
   if (!showIR) return;
   long avg = 0, sum = 0;

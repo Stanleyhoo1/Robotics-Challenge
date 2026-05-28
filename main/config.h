@@ -12,7 +12,7 @@
 #define SERVO_MIN_US    750
 #define SERVO_MAX_US    2250
 #define MIN_ANGLE       60
-#define MAX_ANGLE       160
+#define MAX_ANGLE       180
 #define STEP_DELAY      5     // ms per degree during sweep
 
 // ─────────────────────────────────────────
@@ -22,9 +22,9 @@
 #define RIGHT_MOTOR     2
 #define MOTORON_ADDRESS 16
 #define MOTOR_VOLTAGE   6     // rated motor voltage
-#define INPUT_VOLTAGE   6     // actual supply voltage
+#define INPUT_VOLTAGE   5     // actual supply voltage
 #define TURN_SPEED      500
-#define FORWARD_SPEED   400
+#define FORWARD_SPEED   500
 #define MIN_TURN_SPEED  150   // minimum speed at end of turn slow-zone
 
 // ─────────────────────────────────────────
@@ -57,6 +57,11 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define ULTRASONIC_TIMEOUT  30000     // pulseIn timeout (µs), ~5m max range
 
 // ─────────────────────────────────────────
+// LDR (light-dependent resistor, analog read 0..1023)
+// ─────────────────────────────────────────
+#define LDR_PIN             A7
+
+// ─────────────────────────────────────────
 // RFID
 // ─────────────────────────────────────────
 #define RFID_I2C_ADDRESS    0x28
@@ -77,10 +82,16 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 // Status LED (RGB)
 // ─────────────────────────────────────────
-#define LED_R   50
-#define LED_G   51
-#define LED_B   52
+#define LED_R   48
+#define LED_G   49
 #define LED_BLINK_INTERVAL_MS   500     // blink rate when disabled
+
+// ─────────────────────────────────────────
+// Buttons
+// ─────────────────────────────────────────
+#define POWER_BUTTON      17
+#define REVIVE_BUTTON_1   52
+#define REVIVE_BUTTON_2   53
 
 // ─────────────────────────────────────────
 // Line Following
@@ -94,6 +105,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define JUNCTION_MAX_ROT_DEG    180.0f    // abort spin if exceeded
 #define JUNCTION_NUDGE_MS       150       // forward nudge duration after spin
 #define JUNCTION_FORWARD_MS     300       // forward drive to centre on junction
+#define LINE_FOLLOW_MIN_SPEED   300       // floor for the slow-wheel side of the line-follow PID; below this the motor stalls
 
 // ─────────────────────────────────────────
 // RFID
@@ -112,37 +124,60 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define JUNCTION_SEQUENCE  { -1, 0, 1 }
 
 // ─────────────────────────────────────────
-// Encoders (quadrature, 2 per side, all EXTI-capable on Giga)
+// Encoders (quadrature, 1 per side on the rear wheels; EXTI-capable on Giga).
+// Back-right uses pins 24/25 (what the 4-encoder layout previously assigned
+// to front-left); pins 26/27/28/29 are free.
 // ─────────────────────────────────────────
 #define ENC_BL_A  22
 #define ENC_BL_B  23
-#define ENC_FL_A  24
-#define ENC_FL_B  25
-#define ENC_BR_A  26
-#define ENC_BR_B  27
-#define ENC_FR_A  28
-#define ENC_FR_B  29
+#define ENC_BR_A  14
+#define ENC_BR_B  15
 
 // ─────────────────────────────────────────
 // Grid / encoder calibration
 // ─────────────────────────────────────────
-#define GRID_SPACING_CM         31.25f
-#define TICKS_PER_CM_FALLBACK   8.0f
-#define NODE_ARRIVAL_FRACTION   0.85f
+#define GRID_SPACING_CM         25.0f
+#define TICKS_PER_CM_FALLBACK   159.97f   // measured: 2438 ticks over 6 in (15.24 cm)
+#define NODE_ARRIVAL_FRACTION   0.85f // stops robot early so it doesn't go past hole
 #define CALIB_MIN_SAMPLES       4
 #define CALIB_OUTLIER_PCT       0.20f
 
+// Forward distance to drive after an RFID hit before turning or dispensing
+// a seed. Same value for both intents: it offsets the robot so the wheel
+// axis (= turn pivot) and the seed dispenser sit over the tag/hole.
+#define POST_TAG_FORWARD_CM     5.0f
+
 // ─────────────────────────────────────────
-// Arena halves: left half has black guidance lines, right half has only holes.
-// LEFT_HALF_MAX_COL is the highest column index (0-based) where line-following works.
-// Cols 0..4 ≡ A..E (left half), 5..8 ≡ F..I (right half).
+// Arena zones: the line grid covers the BOTTOM half of the arena across ALL
+// columns. 1-based competition rows 5..9 (= 0-based rows 4..8) have black
+// guidance lines on every column. 0-based rows 0..3 (1-based 1..4) are
+// hole-only — navigate by gyro heading-lock + encoder dead-reckoning.
+// LINE_ZONE_MIN_ROW is the lowest 0-based row index where line-following works.
 // ─────────────────────────────────────────
-#define LEFT_HALF_MAX_COL       4
+#define LINE_ZONE_MIN_ROW       4
+
+// ─────────────────────────────────────────
+// Airlocks (arena-side positions, 0-based row/col).
+// Competition 1-based coords: A = (3, 9), B = (7, 9).
+// Exit base via Tunnel A → robot arrives at Airlock A.
+// Return to base via Tunnel B → robot leaves arena from Airlock B.
+// ─────────────────────────────────────────
+#define AIRLOCK_A_ROW           2
+#define AIRLOCK_A_COL           8
+#define AIRLOCK_B_ROW           6
+#define AIRLOCK_B_COL           8
+
+// Direction the robot is facing right after popping out of Tunnel A into
+// the arena. Used as the seed for robotFacing on the WALL_FOLLOW → ARENA_NAV
+// transition, and to compute the "face base" direction at Airlock B (=
+// (ARENA_ENTRY_FACING + 2) mod 4). Integer value matches the Facing enum in
+// types.h: NORTH=0, EAST=1, SOUTH=2, WEST=3. Default WEST since the tunnel
+// is on the east edge of the arena.
+#define ARENA_ENTRY_FACING_INT  3
 
 // ─────────────────────────────────────────
 // Forward obstacle threshold (cm). A forward ultrasonic reading in
 // [0, OBSTACLE_STOP_CM) latches a stop. -1 (out of range) does NOT trigger.
-// Latch only clears on an isEnabled false→true cycle from the server.
 // ─────────────────────────────────────────
 #define OBSTACLE_STOP_CM        8
 
@@ -152,12 +187,23 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // machine sidesteps non-door obstacles before they're close enough to latch.
 // ─────────────────────────────────────────
 #define OBSTACLE_AVOID_CM       20
-#define OBSTACLE_SIDESTEP_MS    400
-#define OBSTACLE_FORWARD_MS     600
+// #define OBSTACLE_SIDESTEP_MS    400 // change to mark obstacle on grid and replan route
+// #define OBSTACLE_FORWARD_MS     600
 
 // ─────────────────────────────────────────
 // Tunnel wall-following
 // ─────────────────────────────────────────
-#define WALL_FOLLOW_TARGET_CM   15
+#define WALL_FOLLOW_TARGET_CM   14
 #define WALL_KP                 4.0f
-#define WALL_FORWARD_CLEAR_CM   40
+#define WALL_FORWARD_CLEAR_CM   40    // legacy — kept in case tunnel-exit logic reverts
+
+// ─────────────────────────────────────────
+// Base exit sequence (base → airlock → arena).
+// Airlock A = exit (base → arena), Airlock B = entry (arena → base).
+// Turn convention: positive = CW (right) per turnDegrees.
+// ─────────────────────────────────────────
+#define BASE_FIRST_TURN_DEG     90.0f      // right at first intersection for exit
+#define BASE_SECOND_TURN_DEG    -90.0f     // left at T-junction toward gate
+#define BASE_LINE_LOST_PAUSE_MS 1500       // hold still with yellow LED after line lost in base
+#define BASE_FORWARD_NUDGE_MS   500        // drive forward this long after losing line
+#define DOOR_RETRY_INTERVAL_MS  3000       // resend openAirlockX this often while paused at a closed door
