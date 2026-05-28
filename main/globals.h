@@ -20,11 +20,12 @@
 // ─────────────────────────────────────────
 
 // ── main.ino ─────────────────────────────
-extern bool showIR;
-extern bool showDistance;
-extern bool showEncoders;
-extern bool isEnabled;
-extern bool useStateMachine;
+extern bool  showIR;
+extern bool  showDistance;
+extern bool  showEncoders;
+extern bool  isEnabled;
+extern bool  useStateMachine;
+extern float lastForwardDistanceCm;   // updated by the obstacle check each tick
 
 // ── motors.ino ───────────────────────────
 extern MotoronI2C motoron;

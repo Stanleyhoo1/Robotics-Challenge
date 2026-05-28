@@ -81,5 +81,6 @@ enum NavState : uint8_t {
   NAV_AT_TAG,
   NAV_PLANTING,
   NAV_WALL_FOLLOW,
+  NAV_AVOID_OBSTACLE,
   NAV_PARKED
 };

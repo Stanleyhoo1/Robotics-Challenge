@@ -11,11 +11,12 @@
 // ─────────────────────────────────────────
 // Global definitions (extern'd in globals.h)
 // ─────────────────────────────────────────
-bool showIR          = false;
-bool showDistance    = false;
-bool showEncoders    = false;
-bool isEnabled       = false;
-bool useStateMachine = false;   // false = legacy junctionActions[] + rfidLoop path
+bool  showIR               = false;
+bool  showDistance         = false;
+bool  showEncoders         = false;
+bool  isEnabled            = false;
+bool  useStateMachine      = false;   // false = legacy junctionActions[] + rfidLoop path
+float lastForwardDistanceCm = 0.0f;   // refreshed by the obstacle check at top of loop()
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
@@ -52,6 +53,23 @@ void setup() {
 }
 
 void loop() {
+  // ── Forward obstacle / door check ─────────────────────────────────────
+  // Every tick: if forward sensor sees something within OBSTACLE_STOP_CM,
+  // stop motors and skip the body. Auto-resumes when the obstacle clears
+  // (door opens → distance jumps above the threshold). Status is sent
+  // exactly once per rising edge so the server can run its door handshake.
+  // navState is NOT modified — the state machine just pauses for the tick.
+  static bool prevObstacle = false;
+
+  const float distFwd     = getDistanceCM(SENSOR_FORWARD);
+  lastForwardDistanceCm   = distFwd;
+  const bool  obstacleNow = (distFwd >= 0.0f) && (distFwd < (float)OBSTACLE_STOP_CM);
+
+  if (obstacleNow && !prevObstacle) {
+    sendStatus("obstacle_stop");
+  }
+  prevObstacle = obstacleNow;
+
   // ── Always-run pass ───────────────────────────────────────────────────
   // WiFi must run so the server can re-enable us. Serial commands must run
   // so debug tools work while disabled. Encoders and diagnostic prints are
@@ -66,12 +84,21 @@ void loop() {
   readAndPrintEncoders();
 
   // ── Safety gate ───────────────────────────────────────────────────────
-  // When disabled, everything below is skipped. Motors are forced to 0 and
-  // navigation state (if any) is collapsed once on the disable transition.
+  // Skip the body when disabled OR while an obstacle is in front. The
+  // disabled path additionally collapses nav state via handleNavDisable
+  // so it requires explicit re-engagement. The obstacle path just pauses
+  // — navState is preserved and the body resumes as soon as the obstacle
+  // clears, which is the door-opening case.
   if (!isEnabled) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
     if (useStateMachine) handleNavDisable();
+    delay(10);
+    return;
+  }
+  if (obstacleNow) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
     delay(10);
     return;
   }

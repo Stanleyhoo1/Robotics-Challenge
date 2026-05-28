@@ -433,6 +433,24 @@ static void tryRfidAtNode() {
 // right half uses gyro heading-lock + encoder dead-reckoning.
 // ─────────────────────────────────────────
 static void navArenaTick() {
+  // Obstacle-avoidance trigger. Uses the cached forward reading (refreshed
+  // at the top of main loop() each tick) so we don't double-ping the sensor.
+  // The top-of-loop check handles forward < OBSTACLE_STOP_CM (8cm) by
+  // pausing motion entirely; this trigger handles the 8..20cm band by
+  // diverting to a sidestep instead of stopping.
+  if (lastForwardDistanceCm >= 0.0f &&
+      lastForwardDistanceCm < (float)OBSTACLE_AVOID_CM) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    rightHalfDriving = false;
+    endHopHeading();
+    Serial.print("[NAV] obstacle at ");
+    Serial.print(lastForwardDistanceCm);
+    Serial.println(" cm — entering NAV_AVOID_OBSTACLE");
+    navState = NAV_AVOID_OBSTACLE;
+    return;
+  }
+
   if (robotPos.col <= LEFT_HALF_MAX_COL) {
     // Left half — followLine() drives, handleJunction() sets junctionJustHandled.
     followLine();
@@ -546,13 +564,14 @@ void handleNavDisable() {
 // ─────────────────────────────────────────
 const char* navStateStr(NavState s) {
   switch (s) {
-    case NAV_DISABLED:    return "NAV_DISABLED";
-    case NAV_LINE_FOLLOW: return "NAV_LINE_FOLLOW";
-    case NAV_ARENA_NAV:   return "NAV_ARENA_NAV";
-    case NAV_AT_TAG:      return "NAV_AT_TAG";
-    case NAV_PLANTING:    return "NAV_PLANTING";
-    case NAV_WALL_FOLLOW: return "NAV_WALL_FOLLOW";
-    case NAV_PARKED:      return "NAV_PARKED";
+    case NAV_DISABLED:       return "NAV_DISABLED";
+    case NAV_LINE_FOLLOW:    return "NAV_LINE_FOLLOW";
+    case NAV_ARENA_NAV:      return "NAV_ARENA_NAV";
+    case NAV_AT_TAG:         return "NAV_AT_TAG";
+    case NAV_PLANTING:       return "NAV_PLANTING";
+    case NAV_WALL_FOLLOW:    return "NAV_WALL_FOLLOW";
+    case NAV_AVOID_OBSTACLE: return "NAV_AVOID_OBSTACLE";
+    case NAV_PARKED:         return "NAV_PARKED";
   }
   return "?";
 }
@@ -575,6 +594,149 @@ const char* tagStateStr(TagState s) {
     case TAG_PLANTED:   return "PLANTED";
   }
   return "?";
+}
+
+// ─────────────────────────────────────────
+// Between-step abort check for NAV_AVOID_OBSTACLE. Called between blocking
+// turn/drive calls. Services wifi so the heartbeat survives the ~3s
+// maneuver, then aborts to NAV_DISABLED on either disable or a real
+// collision-range forward reading.
+// Returns true when the caller should bail out of the maneuver.
+// ─────────────────────────────────────────
+static bool avoidStepAbort() {
+  wifiLoop();   // keep heartbeat / LED alive during the blocking sequence
+  if (!isEnabled) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    handleNavDisable();
+    Serial.println("[AVOID] aborting — robot disabled mid-maneuver");
+    return true;
+  }
+  const float fwd = getDistanceCM(SENSOR_FORWARD);
+  if (fwd >= 0.0f && fwd < (float)OBSTACLE_STOP_CM) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    navState = NAV_DISABLED;
+    Serial.print("[AVOID] aborting — forward at ");
+    Serial.print(fwd);
+    Serial.println(" cm");
+    return true;
+  }
+  return false;
+}
+
+// ─────────────────────────────────────────
+// NAV_AVOID_OBSTACLE: simple fixed sidestep around a forward obstacle.
+// Runs the whole sequence in one tick (turnDegrees + moveForward are
+// blocking by design). Step 5 is a literal interpretation of the spec —
+// after step 3 the robot is already at original heading, so step 5 is a
+// turnDegrees(0) no-op; this keeps cardinal orientation correct for the
+// state machine's heading tracking. If you want a true U-shape detour
+// (return to original lane), add a sidestep-back drive between steps 4
+// and 5 and change step 5 to turn opposite direction of step 1.
+// ─────────────────────────────────────────
+static void navAvoidObstacleTick() {
+  const float leftDist  = getDistanceCM(SENSOR_LEFT);
+  const float rightDist = getDistanceCM(SENSOR_RIGHT);
+
+  // Direction: +1 = right (CW), -1 = left (CCW). Prefer the side that's
+  // out of range (open space); on ties or both valid, pick the larger.
+  int dir;
+  if      (leftDist  < 0 && rightDist < 0) dir = +1;
+  else if (leftDist  < 0)                  dir = -1;
+  else if (rightDist < 0)                  dir = +1;
+  else                                     dir = (rightDist > leftDist) ? +1 : -1;
+
+  Serial.print("[AVOID] sidestepping ");
+  Serial.print(dir > 0 ? "right" : "left");
+  Serial.print(" (L="); Serial.print(leftDist);
+  Serial.print(" R=");  Serial.print(rightDist);
+  Serial.println(")");
+
+  // Step 1: turn 90° toward the more-clear side.
+  turnDegrees(dir * 90.0f);
+  if (avoidStepAbort()) return;
+
+  // Step 2: sidestep.
+  moveForward(OBSTACLE_SIDESTEP_MS);
+  if (avoidStepAbort()) return;
+
+  // Step 3: turn 90° back toward original heading.
+  turnDegrees(-dir * 90.0f);
+  if (avoidStepAbort()) return;
+
+  // Step 4: drive past the obstacle.
+  moveForward(OBSTACLE_FORWARD_MS);
+  if (avoidStepAbort()) return;
+
+  // Step 5: per spec — "turn 90° to restore original heading". Robot is
+  // already at original heading after step 3, so this is a no-op. Keeping
+  // the call (with 0°) documents the spec literally.
+  turnDegrees(0);
+  if (avoidStepAbort()) return;
+
+  Serial.println("[AVOID] done — returning to NAV_ARENA_NAV");
+  navState = NAV_ARENA_NAV;
+}
+
+// ─────────────────────────────────────────
+// Tunnel wall-following.
+// Non-blocking — one tick of sampling + proportional correction per call.
+// Uses a 5-sample rolling window per side; out-of-range readings (-1) are
+// excluded from the running average. Exits to NAV_ARENA_NAV when the
+// forward ultrasonic indicates the tunnel has opened up.
+// ─────────────────────────────────────────
+void wallFollow() {
+  static float leftBuf[5]  = { -1, -1, -1, -1, -1 };
+  static float rightBuf[5] = { -1, -1, -1, -1, -1 };
+  static int   wallIdx     = 0;
+
+  // Exit check first — uses the cached forward reading from this tick's
+  // top-of-loop obstacle check, so no extra ultrasonic ping here.
+  if (lastForwardDistanceCm >= 0.0f &&
+      lastForwardDistanceCm < (float)WALL_FORWARD_CLEAR_CM) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.println("tunnel exit detected");
+    navState = NAV_ARENA_NAV;
+    return;
+  }
+
+  // Sample LEFT and RIGHT once per tick into the circular buffer.
+  leftBuf[wallIdx]  = getDistanceCM(SENSOR_LEFT);
+  rightBuf[wallIdx] = getDistanceCM(SENSOR_RIGHT);
+  wallIdx = (wallIdx + 1) % 5;
+
+  // Average only the valid (>=0) samples on each side.
+  float leftSum  = 0.0f, rightSum  = 0.0f;
+  int   leftN    = 0,    rightN    = 0;
+  for (int i = 0; i < 5; i++) {
+    if (leftBuf[i]  >= 0.0f) { leftSum  += leftBuf[i];  leftN++; }
+    if (rightBuf[i] >= 0.0f) { rightSum += rightBuf[i]; rightN++; }
+  }
+
+  // Sign convention: positive `error` means "turn left" (left wheel slower,
+  // right wheel faster). Both half-errors below resolve to that convention.
+  float error    = 0.0f;
+  bool  haveError = false;
+  if (leftN > 0 && rightN > 0) {
+    const float leftErr  = (leftSum  / leftN)  - WALL_FOLLOW_TARGET_CM; // too far left → +
+    const float rightErr = WALL_FOLLOW_TARGET_CM - (rightSum / rightN); // too close right → +
+    error    = (leftErr + rightErr) * 0.5f;
+    haveError = true;
+  } else if (leftN > 0) {
+    error    = (leftSum / leftN) - WALL_FOLLOW_TARGET_CM;
+    haveError = true;
+  } else if (rightN > 0) {
+    error    = WALL_FOLLOW_TARGET_CM - (rightSum / rightN);
+    haveError = true;
+  }
+
+  const int correction = haveError ? (int)(WALL_KP * error) : 0;
+  const int leftSpeed  = constrain(BASE_SPEED - correction, 0, 800);
+  const int rightSpeed = constrain(BASE_SPEED + correction, 0, 800);
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(leftSpeed));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(rightSpeed));
 }
 
 // ─────────────────────────────────────────
@@ -627,10 +789,14 @@ void navigationUpdate() {
       navPlantingTick();
       return;
 
+    case NAV_AVOID_OBSTACLE:
+      if (justEntered) Serial.println("[NAV] avoid-obstacle active");
+      navAvoidObstacleTick();
+      return;
+
     case NAV_WALL_FOLLOW:
-      motoron.setSpeedNow(LEFT_MOTOR,  0);
-      motoron.setSpeedNow(RIGHT_MOTOR, 0);
-      if (justEntered) Serial.println("[NAV] wall-follow (stub — tunnel logic pending)");
+      if (justEntered) Serial.println("[NAV] wall-follow active");
+      wallFollow();
       return;
 
     case NAV_PARKED:

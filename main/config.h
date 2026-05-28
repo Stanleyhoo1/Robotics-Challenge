@@ -138,3 +138,26 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // Cols 0..4 ≡ A..E (left half), 5..8 ≡ F..I (right half).
 // ─────────────────────────────────────────
 #define LEFT_HALF_MAX_COL       4
+
+// ─────────────────────────────────────────
+// Forward obstacle threshold (cm). A forward ultrasonic reading in
+// [0, OBSTACLE_STOP_CM) latches a stop. -1 (out of range) does NOT trigger.
+// Latch only clears on an isEnabled false→true cycle from the server.
+// ─────────────────────────────────────────
+#define OBSTACLE_STOP_CM        8
+
+// ─────────────────────────────────────────
+// Obstacle avoidance (NAV_AVOID_OBSTACLE)
+// Trigger threshold sits above the door/emergency threshold so the state
+// machine sidesteps non-door obstacles before they're close enough to latch.
+// ─────────────────────────────────────────
+#define OBSTACLE_AVOID_CM       20
+#define OBSTACLE_SIDESTEP_MS    400
+#define OBSTACLE_FORWARD_MS     600
+
+// ─────────────────────────────────────────
+// Tunnel wall-following
+// ─────────────────────────────────────────
+#define WALL_FOLLOW_TARGET_CM   15
+#define WALL_KP                 4.0f
+#define WALL_FORWARD_CLEAR_CM   40
