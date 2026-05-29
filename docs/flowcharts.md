@@ -272,7 +272,7 @@ flowchart TD
     O --> P
 
 ##9. Path planning for second half of arena (Prospective Flowchart)
-
+```mermaid
     flowchart TD
     A[readSensors read 9-element IR array compute avg, sum update lineCurrentlyDetected] --> B{sum >= IR_MIN_LINE_SUM?}
     B -->|Yes| C[base
@@ -290,3 +290,4 @@ flowchart TD
     K --> L[Planting function called]
     L --> M{Check orientation}
     M -->|No| G
+```
