@@ -274,20 +274,17 @@ flowchart TD
 ##9. Path planning for second half of arena (Prospective Flowchart)
 ```mermaid
     flowchart TD
-    A[readSensors read 9-element IR array compute avg, sum update lineCurrentlyDetected] --> B{sum >= IR_MIN_LINE_SUM?}
-    B -->|Yes| C[base
-    lineLostRecovery blocking]
-    B -->|No| D[scan RFID]
-    D --> E[followLineBase called]
-    E --> F{Is RFID_pos = row5?}
-    F -->|Yes| G[Encoders rotate motors 25cm]
-    F -->|No| A
-    G --> H[navArenaTick poll RFID every tick]
-    H --> I{RFID scanned?}
-    I -->|Yes| J[choose direction + A* algorithm]
-    I -->|No| H
-    J --> K[IMU steer to direction]
+    A[Scan RFID] --> B{Is RFID_pos = row5?}
+    B -- No --> C[followLineBase called]
+    B -- Yes -->D[readSensors read 9-element IR array<br/>compute avg, sum<br/>update lineCurrentlyDetected]
+    D --> E{sum >= IR_MIN_LINE_SUM?}
+    E -- Yes --> F[baseLineLostRecovery blocking]
+    E -- No --> G[choose direction + A* algorithm]
+    G --> H[IMU steer to direction]
+    H --> I[Encoders rotate motors 25cm]
+    I --> J{RFID Scanned?}
+    J -- Yes --> K[navArenaTick<br/>poll RFID every tick]
     K --> L[Planting function called]
-    L --> M{Check orientation}
-    M -->|No| G
+    J -- No --> L[Check orientation]
+    L --> I
 ```
