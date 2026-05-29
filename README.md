@@ -1,10 +1,6 @@
 # Robotics-Challenge
 
-Firmware for a UCL robotics competition robot. The robot starts in an underground base, exits via Tunnel A into a 9×9 arena, plants seeds at fertile RFID-tagged holes, then returns via Tunnel B.
-
 All active firmware lives in `main/`. Other top-level folders (`Saviour`, `WallFollowing`, `line_following`, `motor_test`, `servo_motor`, `wifi`) are earlier standalone sketches kept for reference.
-
-See `CLAUDE.md` for the deep design notes — competition layout, state machine, server protocol, calibration approach.
 
 ## Repository structure
 
