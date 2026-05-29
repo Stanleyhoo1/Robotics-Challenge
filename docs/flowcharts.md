@@ -272,9 +272,11 @@ flowchart TD
     O --> P
 
 ##9. Path planning for second half of arena (Prospective Flowchart)
+
     flowchart TD
     A[readSensors read 9-element IR array compute avg, sum update lineCurrentlyDetected] --> B{sum >= IR_MIN_LINE_SUM?}
-    B -->|Yes| C[baselineLostRecovery blocking]
+    B -->|Yes| C[base
+    lineLostRecovery blocking]
     B -->|No| D[scan RFID]
     D --> E[followLineBase called]
     E --> F{Is RFID_pos = row5?}
