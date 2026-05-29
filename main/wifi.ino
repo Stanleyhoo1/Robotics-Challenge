@@ -34,31 +34,11 @@ void setLED(int r, int g) {
   digitalWrite(LED_G, g);
 }
 
-// Which nav states are actively trying to line-follow. Used by updateLED to
-// decide whether "no line under array" should be surfaced as yellow.
-static bool isLineFollowState(NavState s) {
-  return s == NAV_LINE_FOLLOW
-      || s == NAV_BASE_TO_FIRST_JUNCTION
-      || s == NAV_BASE_TO_TAG
-      || s == NAV_BASE_TO_SECOND_JUNCTION
-      || s == NAV_BASE_TO_LINE_LOST
-      || s == NAV_BASE_LINE_LOST_PAUSE
-      || s == NAV_BASE_RETURN;
-}
-
 void updateLED() {
   // Revive button held: override everything else, show solid green.
-  // Released → falls through to the red / yellow logic below.
+  // Released → falls through to the red logic below.
   if (digitalRead(REVIVE_BUTTON_1) == LOW || digitalRead(REVIVE_BUTTON_2) == LOW) {
     setLED(LOW, HIGH);
-    return;
-  }
-
-  // Yellow whenever we're in a line-follow state but the IR array isn't
-  // sitting on a line — latches on the moment the line is lost, releases as
-  // soon as readSensors sees the line again.
-  if (isLineFollowState(navState) && !lineCurrentlyDetected) {
-    setLED(HIGH, HIGH);
     return;
   }
 

@@ -12,12 +12,6 @@ bool  inJunction       = false;
 float currentKP        = KP;
 unsigned long junctionExitTime = 0;
 
-// Latched by readSensors() every IR poll: true when sum >= IR_MIN_LINE_SUM
-// (i.e. the array is sitting on a line). Consumed by updateLED in wifi.ino
-// to flip the status LED solid yellow while a line-follow state is active
-// but no line is currently under the array.
-bool lineCurrentlyDetected = false;
-
 // ─────────────────────────────────────────
 // Read all sensors into calibratedVals,
 // populate avg and sum by reference
@@ -32,7 +26,6 @@ void readSensors(uint16_t* calibratedVals, long& avg, long& sum) {
     avg += (long)val * (i * 1000);
     sum += val;
   }
-  lineCurrentlyDetected = (sum >= IR_MIN_LINE_SUM);
 }
 
 // ─────────────────────────────────────────
@@ -757,7 +750,7 @@ const char* navActivityStr(NavState s) {
     case NAV_BASE_TO_SECOND_JUNCTION:   return "following line toward T-junction";
     case NAV_BASE_SECOND_TURN:          return "turning at T-junction";
     case NAV_BASE_TO_LINE_LOST:         return "following line until it ends";
-    case NAV_BASE_LINE_LOST_PAUSE:      return "paused (LED yellow) — line lost in base";
+    case NAV_BASE_LINE_LOST_PAUSE:      return "paused — line lost in base";
     case NAV_BASE_FORWARD_NUDGE:        return "driving forward into tunnel mouth";
     case NAV_ARENA_NAV:                 return "arena nav — driving toward next tag";
     case NAV_AT_TAG:                    return "at RFID tag — waiting for fertility reply";
@@ -1227,13 +1220,12 @@ static void navBaseToLineLostTick() {
   if (ls == LINE_LOST) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
-    Serial.println("[BASE] line lost — pausing with yellow LED");
+    Serial.println("[BASE] line lost — pausing momentarily");
     navState = NAV_BASE_LINE_LOST_PAUSE;
   }
 }
 
-// Stop in place for BASE_LINE_LOST_PAUSE_MS, leaving updateLED() to flip the
-// status LED solid yellow on the navState match. Then hand off to the forward
+// Stop in place for BASE_LINE_LOST_PAUSE_MS, then hand off to the forward
 // nudge + wall-follow that probes for the next line / tunnel mouth.
 static void navBaseLineLostPauseTick() {
   static unsigned long pauseStartMs = 0;

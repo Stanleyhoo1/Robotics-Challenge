@@ -33,28 +33,28 @@ main/
 │                      machine is off)
 ├── servo.ino          servo sweep (planting actuator)
 └── wifi.ino           MiniMessenger pub/sub, onMessage parser, send helpers,
-                       heartbeat watchdog, RGB status LED (red/yellow/green)
+                       heartbeat watchdog, status LED
 ```
 
 ## Required libraries
 
-Install via Arduino IDE → Tools → Manage Libraries, or manually drop them into your Arduino libraries folder:
+Install via Arduino IDE → Library Manager:
 
-| Library              | Purpose                            | Source                          |
-|----------------------|------------------------------------|---------------------------------|
-| Motoron              | I2C motor controller driver        | Library Manager ("Motoron")     |
-| LSM6                 | 6-DOF IMU (gyro-only used)         | Library Manager ("LSM6")        |
-| MFRC522_I2C          | RFID reader over I2C               | Manual install — repo: arozcan/MFRC522-I2C-Library |
-| MiniMessenger        | WiFi pub/sub messaging             | Manual install (project-supplied) |
-| Servo                | Servo driver                       | Bundled with Arduino IDE        |
-| kvstore_global_api   | Persistent KV storage (mbed)       | Bundled with Arduino mbed core  |
+| Library              | Purpose                            | 
+|----------------------|------------------------------------|
+| Motoron              | I2C motor controller driver        |
+| LSM6                 | 6-DOF IMU (gyro-only used)         |
+| MFRC522_I2C          | RFID reader over I2C               |
+| MiniMessenger        | WiFi pub/sub messaging             |
+| Servo                | Servo driver                       |
+| kvstore_global_api   | Persistent KV storage (mbed)       |
 
-`kvstore_global_api` is part of the Arduino mbed core that's installed with the Giga board package — installing the board (see below) brings it in automatically. `Servo` ships with the IDE. The other four need explicit installs.
+`kvstore_global_api` is part of the Arduino mbed core that's installed with the Giga board package. Installing the board (see below) brings it in automatically. `Servo` ships with the IDE. The other four need explicit installs.
 
 ## Setup
 
 ### 1. Install the board package
-Arduino IDE → Tools → Board → Boards Manager → search "Giga" → install **Arduino Mbed OS Giga Boards**.
+Arduino IDE → Boards Manager → search "Giga" → install **Arduino Mbed OS Giga Boards**.
 
 ### 2. Create `main/secrets.h`
 This file is gitignored and must be created locally. Template:
@@ -81,8 +81,8 @@ Two things calibrate at boot:
 ## Upload
 
 1. Connect the Giga over USB.
-2. Arduino IDE → Tools → Board → **Arduino Giga R1 WiFi**.
-3. Arduino IDE → Tools → Port → select the device (e.g. `COM5` on Windows, `/dev/ttyACM0` on Linux, `/dev/cu.usbmodem...` on macOS).
+2. Arduino IDE → Select Board → **Arduino Giga R1 WiFi**.
+3. Check the port to make sure it is correct (e.g. `COM5` on Windows, `/dev/ttyACM0` on Linux, `/dev/cu.usbmodem...` on macOS).
 4. Open `main/main.ino` — the IDE will load the whole multi-file sketch from that directory.
 5. Click Upload.
 
@@ -98,7 +98,7 @@ The first compile pulls in all the libraries above; expect ~30 s. Subsequent bui
 
 ## Serial commands
 
-Open the Serial monitor at **115200 baud**, line ending = Newline. Commands are case-insensitive.
+Open the Serial monitor at **115200 baud**, line ending = Newline. Commands are case-insensitive. These were used for debugging and isolating features to test.
 
 ### Movement
 | Command           | Effect                                                 |
@@ -136,7 +136,7 @@ Open the Serial monitor at **115200 baud**, line ending = Newline. Commands are 
 | `selftest`                    | Run hardcoded assertions on the pure-logic code                 |
 
 ### Server passthrough
-Anything not matched above is forwarded verbatim to the server via WiFi — useful for debugging the broker side.
+Anything not matched above is forwarded verbatim to the server via WiFi (to test robot -> server requests and responses).
 
 ## Status LED
 
@@ -144,15 +144,11 @@ The RGB status LED on pins 48 (R) and 49 (G) reflects a small priority stack:
 
 | Color              | Condition                                                                                                     |
 |--------------------|---------------------------------------------------------------------------------------------------------------|
-| **Green**          | Either revive button (52/53) held — overrides everything else, useful for verifying the green channel is wired |
-| **Yellow** (R+G)   | Active line-follow state but the IR array isn't sitting on a line (latches the moment the line is lost, clears the moment it's re-acquired) |
-| **Solid red**      | `isEnabled` true, no line-loss condition                                                                      |
-| **Blinking red**   | `isEnabled` false; awaiting button press / server heartbeat                                                   |
-
-Line-follow states for the yellow trigger: `NAV_LINE_FOLLOW`, `NAV_BASE_TO_FIRST_JUNCTION`, `NAV_BASE_TO_TAG`, `NAV_BASE_TO_SECOND_JUNCTION`, `NAV_BASE_TO_LINE_LOST`, `NAV_BASE_LINE_LOST_PAUSE`, `NAV_BASE_RETURN`.
+| **Green**          | Either revive button (52/53) held — overrides everything else |
+| **Solid red**      | `isEnabled` true                                              |
+| **Blinking red**   | `isEnabled` false; awaiting button press / server heartbeat   |
 
 ## Further reading
 
-- `CLAUDE.md` — full project context: competition layout, state-machine table, server protocol, calibration plan, safety contract.
 - `docs/software_overview.md` — block diagram of the firmware.
 - `docs/flowcharts.md` — flowcharts for line-following, RFID/planting, kill-switch, base exit, line-lost recovery, LED state.

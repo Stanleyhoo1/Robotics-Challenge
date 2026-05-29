@@ -8,7 +8,7 @@ Mermaid diagrams for the key control flows. They render on GitHub, GitLab, and m
 
 ```mermaid
 flowchart TD
-    A[followLineBase called] --> B[readSensors<br/>read 9-element IR array<br/>compute avg, sum<br/>update lineCurrentlyDetected]
+    A[followLineBase called] --> B[readSensors<br/>read 9-element IR array<br/>compute avg, sum]
     B --> C{sum >= IR_MIN_LINE_SUM?}
     C -- yes --> D[lastPosition = avg/sum<br/>error = LINE_CENTER - lastPosition<br/>correction = KP * error]
     D --> E[left = constrain BASE_SPEED + correction,<br/>     LINE_FOLLOW_MIN_SPEED, 800<br/>right = constrain BASE_SPEED - correction,<br/>     LINE_FOLLOW_MIN_SPEED, 800<br/>scaleSpeed and apply via Motoron]
@@ -132,7 +132,7 @@ flowchart TD
     R --> S[NAV_BASE_TO_LINE_LOST<br/>followLineBase]
     S --> T{LINE_LOST?<br/>tunnel mouth reached}
     T -- no --> S
-    T -- yes --> U[stop motors<br/>NAV_BASE_LINE_LOST_PAUSE<br/>LED solid yellow]
+    T -- yes --> U[stop motors<br/>NAV_BASE_LINE_LOST_PAUSE<br/>momentary hold]
     U --> V[hold BASE_LINE_LOST_PAUSE_MS<br/>1500 ms]
     V --> W[NAV_BASE_FORWARD_NUDGE<br/>delay BASE_FORWARD_NUDGE_MS<br/>at BASE_SPEED]
     W --> X[NAV_WALL_FOLLOW<br/>through Tunnel A]
@@ -179,23 +179,18 @@ The total angular search range is ±90° from start. Each sweep stops the instan
 flowchart TD
     A[updateLED] --> B{REVIVE_BUTTON_1 LOW or<br/>REVIVE_BUTTON_2 LOW?}
     B -- yes --> C[setLED LOW, HIGH<br/>solid green]
-    B -- no --> D{isLineFollowState navState<br/>and !lineCurrentlyDetected?}
-    D -- yes --> E[setLED HIGH, HIGH<br/>solid yellow R+G]
-    D -- no --> F{isEnabled?}
+    B -- no --> F{isEnabled?}
     F -- yes --> G[setLED HIGH, LOW<br/>solid red]
     F -- no --> H{millis - lastBlinkMs<br/>> LED_BLINK_INTERVAL_MS?}
     H -- no --> I[no change<br/>previous blink state holds]
     H -- yes --> J[blinkState = !blinkState<br/>setLED blinkState ? HIGH : LOW, LOW]
     C --> K[return]
-    E --> K
     G --> K
     I --> K
     J --> K
 ```
 
-Line-follow states (yellow trigger): `NAV_LINE_FOLLOW`, `NAV_BASE_TO_FIRST_JUNCTION`, `NAV_BASE_TO_TAG`, `NAV_BASE_TO_SECOND_JUNCTION`, `NAV_BASE_TO_LINE_LOST`, `NAV_BASE_LINE_LOST_PAUSE`, `NAV_BASE_RETURN`.
-
-`lineCurrentlyDetected` is updated by every `readSensors()` call (line-follow ticks, wall-follow exit check, line-lost recovery sweeps). Outside line-follow states the flag is stale but ignored, so wall-follow / arena no-line-zone / planting all show normal red.
+Revive buttons (52/53) are the only override. Otherwise the LED is solid red while `isEnabled` is true and blinks red at `LED_BLINK_INTERVAL_MS` while disabled.
 
 ## 7. Return-to-base sequence
 

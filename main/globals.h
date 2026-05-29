@@ -63,4 +63,3 @@ extern GridPos   targetPos;
 extern Facing    robotFacing;
 extern int       seedsRemaining;
 extern int       pendingJunctionDir;
-extern bool      lineCurrentlyDetected;   // updated by readSensors; consumed by updateLED

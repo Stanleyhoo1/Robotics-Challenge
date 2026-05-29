@@ -86,7 +86,7 @@ enum NavState : uint8_t {
   NAV_BASE_TO_SECOND_JUNCTION,   // exitClearance received, line-follow to T-junction
   NAV_BASE_SECOND_TURN,          // turn opposite direction of first turn
   NAV_BASE_TO_LINE_LOST,         // line-follow until LINE_LOST
-  NAV_BASE_LINE_LOST_PAUSE,      // momentary stop with yellow LED after losing line
+  NAV_BASE_LINE_LOST_PAUSE,      // momentary stop after losing line before tunnel approach
   NAV_BASE_FORWARD_NUDGE,        // brief forward drive, then wall-follow tunnel
   // Arena states
   NAV_ARENA_NAV,

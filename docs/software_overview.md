@@ -35,10 +35,10 @@ Text-based block diagram of the firmware. Arrows mean "calls" or "delegates to".
 onMessage   updateLED                                                 │
 parser     priority stack:                                            │
    │       1. revive btn → green                                      │
-   │       2. line-follow state                                       │
-isEnabled     + no line → yellow                                      │
-heartbeat  3. isEnabled  → solid red                                  │
-fertileResult 4. else     → blink red                                 │
+   │       2. isEnabled  → solid red                                  │
+isEnabled  3. else       → blink red                                  │
+heartbeat                                                             │
+fertileResult                                                         │
 exit/enterClearance                                                   │
    │                                                                  │
    ▼                                                                  ▼
@@ -119,7 +119,7 @@ Key invariants:
    │  NAV_BASE_TO_LINE_LOST       →  followLineBase()                        │
    │     LINE_LOST       → NAV_BASE_LINE_LOST_PAUSE                          │
    │                                                                         │
-   │  NAV_BASE_LINE_LOST_PAUSE    →  motors = 0, LED yellow                  │
+   │  NAV_BASE_LINE_LOST_PAUSE    →  motors = 0, momentary hold              │
    │     hold BASE_LINE_LOST_PAUSE_MS → NAV_BASE_FORWARD_NUDGE               │
    │                                                                         │
    │  NAV_BASE_FORWARD_NUDGE      →  delay BASE_FORWARD_NUDGE_MS forward     │
@@ -315,7 +315,7 @@ matches:        sendPosition sendStatus sendOpenAirlockA      │
 
 `wifiLoop()` runs:
 1. `messenger.loop()`
-2. `updateLED()` — applies the priority stack (revive → yellow line-lost → red enabled → blink red disabled)
+2. `updateLED()` — applies the priority stack (revive → red enabled → blink red disabled)
 3. Heartbeat watchdog: `lastHeartbeatMs != 0 && now - last > HEARTBEAT_TIMEOUT_MS` → `isEnabled = false`
 4. Re-registration every `REGISTER_INTERVAL_MS` (10 s)
 

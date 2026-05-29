@@ -204,6 +204,6 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 #define BASE_FIRST_TURN_DEG     90.0f      // right at first intersection for exit
 #define BASE_SECOND_TURN_DEG    -90.0f     // left at T-junction toward gate
-#define BASE_LINE_LOST_PAUSE_MS 1500       // hold still with yellow LED after line lost in base
+#define BASE_LINE_LOST_PAUSE_MS 1500       // momentary stop after line lost in base before tunnel approach
 #define BASE_FORWARD_NUDGE_MS   500        // drive forward this long after losing line
 #define DOOR_RETRY_INTERVAL_MS  3000       // resend openAirlockX this often while paused at a closed door
