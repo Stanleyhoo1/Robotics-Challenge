@@ -284,8 +284,6 @@ flowchart TD
     H --> I[Encoders rotate motors 25cm]
     I --> J{RFID Scanned?}
     J -- Yes --> K[navArenaTick<br/>poll RFID every tick]
-    K --> L[Planting function called]
     J -- No --> L[Check orientation]
-    L --> I
     K --> M[Planting function called]
 ```
