@@ -223,7 +223,7 @@ Notes:
 
 ## 8. Junction handling (legacy)
 
-`handleJunction()` is invoked from `followLine()` (legacy `NAV_LINE_FOLLOW` test mode only). The state-machine path uses `baseTurnBlocking()` for base junctions and `NAV_POST_TAG_NUDGE` for arena turns — both are simpler and don't go through this function.
+`handleJunction()` is invoked from `followLine()` (legacy `NAV_LINE_FOLLOW` test mode only). The state-machine path uses `baseTurnBlocking()` for base junctions and `NAV_POST_TAG_NUDGE` for arena turns. Both are simpler and don't go through this function.
 
 ```mermaid
 flowchart TD
@@ -249,3 +249,42 @@ flowchart TD
 ```
 
 Kept for the test-mode path and for reference, but the production base-exit and arena flows do not use it.
+
+flowchart TD
+    A[handleJunction] --> B{inJunction?}
+    B -- yes --> Z[return]
+    B -- no --> C[inJunction = true]
+    C --> D{useStateMachine?}
+    D -- yes --> E[action = pendingJunctionDir]
+    D -- no --> F{junctionCount<br/>more-or-equal<br/>length junctionActions?}
+    F -- yes --> G[motors = 0<br/>all junctions complete<br/>return]
+    F -- no --> H[action = junctionActions junctionCount++]
+    E --> I[motors = BASE_SPEED both<br/>delay JUNCTION_FORWARD_MS<br/>drive past junction centre]
+    H --> I
+    I --> J{action == 0?<br/>straight}
+    J -- yes --> K[skip spin]
+    J -- no --> L[spinUntilLine action<br/>spin until line reappears<br/>on the correct side<br/>then nudge JUNCTION_NUDGE_MS]
+    K --> M[delay 100 ms<br/>currentKP = KP_AGGRESSIVE<br/>junctionExitTime = now<br/>inJunction = false]
+    L --> M
+    M --> N{useStateMachine?}
+    N -- yes --> O[robotFacing = facingAfterTurn action<br/>junctionJustHandled = true]
+    N -- no --> P[return]
+    O --> P
+
+##9. Path planning for second half of arena (Prospective Flowchart)
+    flowchart TD
+    A[readSensors read 9-element IR array compute avg, sum update lineCurrentlyDetected] --> B{sum >= IR_MIN_LINE_SUM?}
+    B -->|Yes| C[baselineLostRecovery blocking]
+    B -->|No| D[scan RFID]
+    D --> E[followLineBase called]
+    E --> F{Is RFID_pos = row5?}
+    F -->|Yes| G[Encoders rotate motors 25cm]
+    F -->|No| A
+    G --> H[navArenaTick poll RFID every tick]
+    H --> I{RFID scanned?}
+    I -->|Yes| J[choose direction + A* algorithm]
+    I -->|No| H
+    J --> K[IMU steer to direction]
+    K --> L[Planting function called]
+    L --> M{Check orientation}
+    M -->|No| G
