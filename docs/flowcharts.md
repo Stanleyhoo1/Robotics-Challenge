@@ -287,4 +287,5 @@ flowchart TD
     K --> L[Planting function called]
     J -- No --> L[Check orientation]
     L --> I
+    K --> M[Planting function called]
 ```
