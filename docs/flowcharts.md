@@ -275,12 +275,12 @@ flowchart TD
 ```mermaid
     flowchart TD
     A[Scan RFID] --> B{Is RFID_pos = row5?}
-    B -- No --> C[followLineBase called]
-    B -- Yes -->D[readSensors read 9-element IR array<br/>compute avg, sum<br/>update lineCurrentlyDetected]
-    D --> E{sum >= IR_MIN_LINE_SUM?}
-    E -- Yes --> F[baseLineLostRecovery blocking]
-    E -- No --> G[choose direction + A* algorithm]
-    G --> H[IMU steer to direction]
+    B -- Yes -->C[readSensors read 9-element IR array<br/>compute avg, sum<br/>update lineCurrentlyDetected]
+    B --No --> D[followLineBase called]
+    C --> E{sum >= IR_MIN_LINE_SUM?}
+    E -- No --> F[choose direction + A* algorithm]
+    E -- Yes --> G[baseLineLostRecovery blocking]
+    F --> H[IMU steer to direction]
     H --> I[Encoders rotate motors 25cm]
     I --> J{RFID Scanned?}
     J -- Yes --> K[navArenaTick<br/>poll RFID every tick]
