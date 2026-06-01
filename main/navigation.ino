@@ -31,34 +31,30 @@ void readSensors(uint16_t* calibratedVals, long& avg, long& sum) {
 // ─────────────────────────────────────────
 // Classify what the sensors are seeing.
 // IR array is mounted with sensor 0 on the PHYSICAL RIGHT and sensor 8 on
-// the PHYSICAL LEFT — the zone names below reflect physical orientation,
-// not array indexing.
+// the PHYSICAL LEFT — the zone names below reflect physical orientation.
 //   - right side = sensors 0 AND 1 both above JUNCTION_ZONE_ACTIVE_THRESHOLD
 //   - left  side = sensors 7 AND 8 both above the same threshold
-//   - middle     = any of sensors 3, 4, 5 above the same threshold
 // Patterns:
-//   - left AND right                → LINE_JUNCTION_BOTH (T-junction, ~all 9)
-//   - middle AND left,  no right    → LINE_JUNCTION_LEFT  (fork left)
-//   - middle AND right, no left     → LINE_JUNCTION_RIGHT (fork right)
-// Requiring BOTH outer sensors on a side AND a high per-sensor threshold
-// keeps PID drift / borderline readings from tripping a phantom fork — a
-// real branch is wide enough to span the outer pair AND saturates the IR.
-// The line-follower's position math (avg / sum) is internally consistent
-// regardless of the physical mount direction, so it isn't affected.
+//   - left AND right        → LINE_JUNCTION_BOTH  (T-junction, ~all 9 lit)
+//   - left only, no right   → LINE_JUNCTION_LEFT  (line goes left — fork or L-turn)
+//   - right only, no left   → LINE_JUNCTION_RIGHT (line goes right — fork or L-turn)
+// The middle-zone requirement is intentionally NOT used: an L-turn or a fork
+// approached off-centre may put the line entirely on one side with no middle
+// activity. Requiring BOTH outer sensors on a side keeps PID drift from
+// tripping a phantom junction — a real branch is wide enough to span the
+// outer pair, while normal lane drift only touches one outer sensor at a
+// time. The line-follower's position math is unaffected.
 // ─────────────────────────────────────────
 LineState getLineState(uint16_t* calibratedVals, long sum) {
   if (sum < IR_MIN_LINE_SUM) return LINE_LOST;
 
   const int T = JUNCTION_ZONE_ACTIVE_THRESHOLD;
-  const bool rightActive  = (calibratedVals[0] > T) && (calibratedVals[1] > T);
-  const bool leftActive   = (calibratedVals[7] > T) && (calibratedVals[8] > T);
-  const bool middleActive = (calibratedVals[3] > T) ||
-                            (calibratedVals[4] > T) ||
-                            (calibratedVals[5] > T);
+  const bool rightActive = (calibratedVals[0] > T) && (calibratedVals[1] > T);
+  const bool leftActive  = (calibratedVals[7] > T) && (calibratedVals[8] > T);
 
-  if (leftActive && rightActive)                   return LINE_JUNCTION_BOTH;
-  if (middleActive && leftActive  && !rightActive) return LINE_JUNCTION_LEFT;
-  if (middleActive && rightActive && !leftActive)  return LINE_JUNCTION_RIGHT;
+  if (leftActive && rightActive)   return LINE_JUNCTION_BOTH;
+  if (leftActive  && !rightActive) return LINE_JUNCTION_LEFT;
+  if (rightActive && !leftActive)  return LINE_JUNCTION_RIGHT;
   return LINE_NORMAL;
 }
 
@@ -1267,26 +1263,48 @@ static void navBaseToTagTick() {
   }
 }
 
+// File-local: type of the second junction, latched at first detection so a
+// later transient T pattern can't override an initial LEFT/RIGHT reading
+// (the robot's IR array briefly sees the whole line as it passes through).
+static LineState secondJunctionType = LINE_NORMAL;
+
 static void navBaseToSecondJunctionTick() {
   LineState ls = followLineBase();
   if (isJunctionState(ls)) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
-    Serial.println("[BASE] second junction reached");
+    secondJunctionType = ls;
+    Serial.print("[BASE] second junction reached: ");
+    Serial.println(ls == LINE_JUNCTION_LEFT  ? "LEFT" :
+                   ls == LINE_JUNCTION_RIGHT ? "RIGHT" :
+                                               "BOTH (T)");
     navState = NAV_BASE_SECOND_TURN;
   } else if (ls == LINE_LOST) {
     handleBaseUnexpectedLineLoss();
   }
 }
 
-// Second-junction turn: a fork, never straight. Direction comes from
-// BASE_SECOND_TURN_DEG (sign picks left/right). Last junction in the base
-// exit; hands off to the line-lost watcher for the tunnel approach.
+// Second-junction turn. Direction picked from the latched detection type:
+//   LEFT  -> turn left  (-90°)
+//   RIGHT -> turn right (+90°)
+//   BOTH  -> match sign of BASE_FIRST_TURN_DEG (same direction as first turn)
+// Magnitude comes from |BASE_SECOND_TURN_DEG|.
 static void navBaseSecondTurnTick() {
+  const float mag = fabsf(BASE_SECOND_TURN_DEG);
+  float turnDeg;
+  const char* label;
+  switch (secondJunctionType) {
+    case LINE_JUNCTION_LEFT:  turnDeg = -mag;                                       label = "LEFT";              break;
+    case LINE_JUNCTION_RIGHT: turnDeg =  mag;                                       label = "RIGHT";             break;
+    case LINE_JUNCTION_BOTH:  turnDeg = (BASE_FIRST_TURN_DEG >= 0.0f) ? mag : -mag; label = "BOTH (match first)"; break;
+    default:                  turnDeg = BASE_SECOND_TURN_DEG;                       label = "default";           break;
+  }
   Serial.print("[BASE] second turn ");
-  Serial.print(BASE_SECOND_TURN_DEG);
-  Serial.println(" deg");
-  if (!baseTurnBlocking(BASE_SECOND_TURN_DEG)) return;
+  Serial.print(turnDeg);
+  Serial.print(" deg (");
+  Serial.print(label);
+  Serial.println(")");
+  if (!baseTurnBlocking(turnDeg)) return;
   navState = NAV_BASE_TO_LINE_LOST;
 }
 
