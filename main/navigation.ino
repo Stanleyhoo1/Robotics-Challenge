@@ -29,25 +29,31 @@ void readSensors(uint16_t* calibratedVals, long& avg, long& sum) {
 }
 
 // ─────────────────────────────────────────
-// Classify what the sensors are seeing
+// Classify what the sensors are seeing.
+//   - left side  = sensors 0 AND 1 both above JUNCTION_ZONE_ACTIVE_THRESHOLD
+//   - right side = sensors 7 AND 8 both above JUNCTION_ZONE_ACTIVE_THRESHOLD
+//   - middle     = any of sensors 3, 4, 5 above the same threshold
+// Patterns:
+//   - left AND right                → LINE_JUNCTION_BOTH (T-junction, ~all 9)
+//   - middle AND left,  no right    → LINE_JUNCTION_LEFT  (fork left)
+//   - middle AND right, no left     → LINE_JUNCTION_RIGHT (fork right)
+// Requiring BOTH outer sensors on a side AND a high per-sensor threshold
+// keeps PID drift / borderline readings from tripping a phantom fork — a
+// real branch is wide enough to span the outer pair AND saturates the IR.
 // ─────────────────────────────────────────
 LineState getLineState(uint16_t* calibratedVals, long sum) {
-  bool leftActive  = false;
-  bool rightActive = false;
-  int  activeCount = 0;
+  if (sum < IR_MIN_LINE_SUM) return LINE_LOST;
 
-  for (int i = 0; i < IR_SENSOR_COUNT; i++) {
-    if (calibratedVals[i] > 500) {
-      activeCount++;
-      if (i <= 2) leftActive  = true;
-      if (i >= 6) rightActive = true;
-    }
-  }
+  const int T = JUNCTION_ZONE_ACTIVE_THRESHOLD;
+  const bool leftActive   = (calibratedVals[0] > T) && (calibratedVals[1] > T);
+  const bool rightActive  = (calibratedVals[7] > T) && (calibratedVals[8] > T);
+  const bool middleActive = (calibratedVals[3] > T) ||
+                            (calibratedVals[4] > T) ||
+                            (calibratedVals[5] > T);
 
-  if (sum < IR_MIN_LINE_SUM)           return LINE_LOST;
-  if (leftActive && rightActive)       return LINE_JUNCTION_BOTH;
-  if (leftActive  && activeCount >= 7) return LINE_JUNCTION_LEFT;
-  if (rightActive && activeCount >= 7) return LINE_JUNCTION_RIGHT;
+  if (leftActive && rightActive)                   return LINE_JUNCTION_BOTH;
+  if (middleActive && leftActive  && !rightActive) return LINE_JUNCTION_LEFT;
+  if (middleActive && rightActive && !leftActive)  return LINE_JUNCTION_RIGHT;
   return LINE_NORMAL;
 }
 
@@ -91,6 +97,15 @@ void spinUntilLine(int direction) {
       if (direction == -1 && highActive && !lowActive)  break;
     }
 
+    wifiLoop();
+    checkPowerButton();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      Serial.println("spinUntilLine aborted: !isEnabled");
+      return;
+    }
+
     delay(5);
   }
 
@@ -98,7 +113,15 @@ void spinUntilLine(int direction) {
   motoron.setSpeedNow(RIGHT_MOTOR, 0);
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
-  delay(JUNCTION_NUDGE_MS);
+
+  // Final nudge — also polled, so a button press during the nudge stops us.
+  unsigned long nudgeStart = millis();
+  while (millis() - nudgeStart < (unsigned long)JUNCTION_NUDGE_MS) {
+    wifiLoop();
+    checkPowerButton();
+    if (!isEnabled) break;
+    delay(5);
+  }
   motoron.setSpeedNow(LEFT_MOTOR,  0);
   motoron.setSpeedNow(RIGHT_MOTOR, 0);
 }
@@ -139,7 +162,21 @@ void handleJunction() {
 
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
-  delay(JUNCTION_FORWARD_MS);
+  // Polled forward nudge — button / heartbeat can stop us mid-drive.
+  {
+    unsigned long ts = millis();
+    while (millis() - ts < (unsigned long)JUNCTION_FORWARD_MS) {
+      wifiLoop();
+      checkPowerButton();
+      if (!isEnabled) {
+        motoron.setSpeedNow(LEFT_MOTOR,  0);
+        motoron.setSpeedNow(RIGHT_MOTOR, 0);
+        inJunction = false;
+        return;
+      }
+      delay(5);
+    }
+  }
 
   if (action != 0) spinUntilLine(action);
 
@@ -366,7 +403,7 @@ bool selectNextTarget(GridPos from, GridPos& target) {
 // `tagMap` is defined further up alongside the helpers — keeping it adjacent
 // to selectNextTarget() since that's where it's primarily read.
 // ─────────────────────────────────────────
-NavState navState           = NAV_BASE_TO_FIRST_JUNCTION;   // boot at start of base-exit; button press just enables it
+NavState navState           = NAV_BASE_TO_FIRST_JUNCTION;   // boot at start of base-exit; enable signal starts the run
 GridPos  robotPos           = { -1, -1 };
 GridPos  targetPos          = { -1, -1 };
 Facing   robotFacing        = NORTH;
@@ -681,6 +718,11 @@ static void navPlantingTick() {
 // !isEnabled; we touch file-local state that main.ino can't reach directly.
 // Idempotent — safe to call every tick while disabled.
 // ─────────────────────────────────────────
+// Set true by handleNavDisable, cleared on first re-enabled navigationUpdate
+// tick. Used to print a clear "re-engaged" message so disable/re-enable cycles
+// are visible in the serial log.
+bool wasDisabled = true;
+
 void handleNavDisable() {
   // navState is intentionally preserved — re-enable resumes whatever state
   // was active before. Only mid-hop / mid-turn bookkeeping that would go
@@ -693,6 +735,7 @@ void handleNavDisable() {
   }
   deadReckonDriving = false;
   endHopHeading();
+  wasDisabled = true;
 }
 
 // ─────────────────────────────────────────
@@ -851,16 +894,19 @@ static void navAvoidObstacleTick() {
 }
 
 // ─────────────────────────────────────────
-// Tunnel wall-following.
-// Non-blocking — one tick of sampling + proportional correction per call.
-// Uses a 5-sample rolling window per side; out-of-range readings (-1) are
-// excluded from the running average. Exits to NAV_ARENA_NAV when the
-// forward ultrasonic indicates the tunnel has opened up.
+// Tunnel wall-following (PD on left/right balance).
+// Non-blocking — one tick of sampling + PD correction per call.
+// Goal is to keep leftDist ≈ rightDist (centered in tunnel), not to hit a
+// target distance. EMA-smooths each side; on a bad read, holds the last
+// smoothed value rather than jerking. Exits to NAV_ARENA_NAV (exit path)
+// or NAV_BASE_RETURN (return path) when the IR array sees a line.
 // ─────────────────────────────────────────
 void wallFollow() {
-  static float leftBuf[5]  = { -1, -1, -1, -1, -1 };
-  static float rightBuf[5] = { -1, -1, -1, -1, -1 };
-  static int   wallIdx     = 0;
+  static float leftSmoothed  = 0.0f;
+  static float rightSmoothed = 0.0f;
+  static float prevError     = 0.0f;
+  static unsigned long prevTime = 0;
+  static bool  initialized   = false;
 
   // Exit check: IR sees a line — we're in the arena. The door-wait case
   // (forward < OBSTACLE_STOP_CM) is handled by the top-of-loop pause in
@@ -873,6 +919,8 @@ void wallFollow() {
     if (sum >= IR_MIN_LINE_SUM) {
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      // Reset PD state so the next entry into wallFollow starts fresh.
+      initialized = false;
       if (navState == NAV_TUNNEL_B_WALL_FOLLOW) {
         // Return path: just popped into base — hand off to line-follow.
         Serial.println("[WALL_B] line detected — entering NAV_BASE_RETURN");
@@ -897,41 +945,53 @@ void wallFollow() {
     }
   }
 
-  // Sample LEFT and RIGHT once per tick into the circular buffer.
-  leftBuf[wallIdx]  = getDistanceCM(SENSOR_LEFT);
-  rightBuf[wallIdx] = getDistanceCM(SENSOR_RIGHT);
-  wallIdx = (wallIdx + 1) % 5;
+  // Sample both sides once per tick.
+  const float rawLeft  = getDistanceCM(SENSOR_LEFT);
+  const float rawRight = getDistanceCM(SENSOR_RIGHT);
 
-  // Average only the valid (>=0) samples on each side.
-  float leftSum  = 0.0f, rightSum  = 0.0f;
-  int   leftN    = 0,    rightN    = 0;
-  for (int i = 0; i < 5; i++) {
-    if (leftBuf[i]  >= 0.0f) { leftSum  += leftBuf[i];  leftN++; }
-    if (rightBuf[i] >= 0.0f) { rightSum += rightBuf[i]; rightN++; }
+  // EMA per side; skip update on bad reads (hold last smoothed value).
+  if (rawLeft  >= 0.0f) {
+    leftSmoothed  = initialized
+      ? (WALL_EMA_ALPHA * rawLeft  + (1.0f - WALL_EMA_ALPHA) * leftSmoothed)
+      : rawLeft;
+  }
+  if (rawRight >= 0.0f) {
+    rightSmoothed = initialized
+      ? (WALL_EMA_ALPHA * rawRight + (1.0f - WALL_EMA_ALPHA) * rightSmoothed)
+      : rawRight;
   }
 
-  // Sign convention: positive `error` means "turn left" (left wheel slower,
-  // right wheel faster). Both half-errors below resolve to that convention.
-  float error    = 0.0f;
-  bool  haveError = false;
-  if (leftN > 0 && rightN > 0) {
-    const float leftErr  = (leftSum  / leftN)  - WALL_FOLLOW_TARGET_CM; // too far left → +
-    const float rightErr = WALL_FOLLOW_TARGET_CM - (rightSum / rightN); // too close right → +
-    error    = (leftErr + rightErr) * 0.5f;
-    haveError = true;
-  } else if (leftN > 0) {
-    error    = (leftSum / leftN) - WALL_FOLLOW_TARGET_CM;
-    haveError = true;
-  } else if (rightN > 0) {
-    error    = WALL_FOLLOW_TARGET_CM - (rightSum / rightN);
-    haveError = true;
+  // Wait for one good reading from each side before engaging PD; until then
+  // drive straight so the robot keeps moving into the tunnel.
+  if (!initialized) {
+    if (rawLeft >= 0.0f && rawRight >= 0.0f) {
+      initialized = true;
+      prevError   = leftSmoothed - rightSmoothed;
+      prevTime    = millis();
+    }
+    motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(WALL_BASE_SPEED));
+    motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(WALL_BASE_SPEED));
+    return;
   }
 
-  const int correction = haveError ? (int)(WALL_KP * error) : 0;
-  const int leftSpeed  = constrain(BASE_SPEED - correction, 0, 800);
-  const int rightSpeed = constrain(BASE_SPEED + correction, 0, 800);
+  // Balance error: positive → left wall farther (closer to right wall) →
+  // steer left → slow left wheel, speed up right wheel.
+  const unsigned long now = millis();
+  float dt = (now - prevTime) / 1000.0f;
+  if (dt <= 0.0f) dt = 0.06f;  // guard against zero/negative dt
+
+  const float error      = leftSmoothed - rightSmoothed;
+  const float dError     = (error - prevError) / dt;
+  float correction       = WALL_KP * error + WALL_KD * dError;
+  correction = constrain(correction, -(float)WALL_MAX_CORRECTION, (float)WALL_MAX_CORRECTION);
+
+  const int leftSpeed  = constrain(WALL_BASE_SPEED - (int)correction, 0, 800);
+  const int rightSpeed = constrain(WALL_BASE_SPEED + (int)correction, 0, 800);
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(leftSpeed));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(rightSpeed));
+
+  prevError = error;
+  prevTime  = now;
 }
 
 // ─────────────────────────────────────────
@@ -1018,6 +1078,7 @@ static bool baseTurnBlocking(float deg) {
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
   while (hopDistanceCm() < POST_TAG_FORWARD_CM) {
     wifiLoop();
+    checkPowerButton();
     if (!isEnabled) {
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
@@ -1074,6 +1135,7 @@ static bool sweepForLine(int direction, float maxDeg) {
     }
 
     wifiLoop();
+    checkPowerButton();
     if (!isEnabled) {
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
@@ -1103,6 +1165,7 @@ static bool baseLineLostRecovery() {
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
   while (hopDistanceCm() < POST_TAG_FORWARD_CM) {
     wifiLoop();
+    checkPowerButton();
     if (!isEnabled) {
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
@@ -1125,31 +1188,35 @@ static bool baseLineLostRecovery() {
     }
   }
 
-  if (sweepForLine(-1, 90.0f)) {
+  if (sweepForLine(-1, 110.0f)) {
     Serial.println("[RECOVER] line acquired on left sweep");
     return true;
   }
   if (!isEnabled) return false;
-  if (sweepForLine(+1, 180.0f)) {
+  if (sweepForLine(+1, 220.0f)) {
     Serial.println("[RECOVER] line acquired on right sweep");
     return true;
   }
   if (!isEnabled) return false;
   // Re-centre to roughly the original heading so the bot's mental model and
   // the visible orientation match. Best-effort — return value is ignored.
-  sweepForLine(-1, 90.0f);
+  sweepForLine(-1, 110.0f);
 
   Serial.println("[RECOVER] line not found in ±90° sweep");
   return false;
 }
 
 // Common LINE_LOST handler for unexpected-loss states in the base: run the
-// recovery routine; on failure, send status + park so the operator can
-// intervene rather than thrashing forever.
+// recovery routine. On failure, leave navState alone (so re-enable resumes
+// the same line-follow state) and hold motors at 0. NAV_PARKED is the
+// end-of-run state — using it for mid-run failures conflates "run complete"
+// with "needs operator attention".
 static void handleBaseUnexpectedLineLoss() {
   if (!baseLineLostRecovery()) {
     sendStatus("base_recovery_failed");
-    navState = NAV_PARKED;
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    Serial.println("[BASE] recovery failed — holding. Re-enable, reposition, or send a new command.");
   }
 }
 
@@ -1184,7 +1251,7 @@ static void navBaseToTagTick() {
     Serial.print("[BASE] tag detected: ");
     Serial.println(uid);
     Serial.println("[BASE] sending openAirlockA — waiting for exitClearance before continuing");
-    sendOpenAirlockA();
+    sendOpenAirlockA(uid);
     clearanceRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
     navState = NAV_WAIT_EXIT_CLEARANCE;
     return;
@@ -1247,11 +1314,22 @@ static void navBaseForwardNudgeTick() {
   Serial.println(" ms then wall-follow");
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
-  delay(BASE_FORWARD_NUDGE_MS);
+  {
+    unsigned long ts = millis();
+    while (millis() - ts < (unsigned long)BASE_FORWARD_NUDGE_MS) {
+      wifiLoop();
+      checkPowerButton();
+      if (!isEnabled) {
+        motoron.setSpeedNow(LEFT_MOTOR,  0);
+        motoron.setSpeedNow(RIGHT_MOTOR, 0);
+        handleNavDisable();
+        return;
+      }
+      delay(5);
+    }
+  }
   motoron.setSpeedNow(LEFT_MOTOR,  0);
   motoron.setSpeedNow(RIGHT_MOTOR, 0);
-  wifiLoop();
-  if (!isEnabled) { handleNavDisable(); return; }
   navState = NAV_WALL_FOLLOW;
 }
 
@@ -1276,8 +1354,25 @@ static void navAtAirlockBTick() {
     if (!isEnabled) { handleNavDisable(); return; }
     robotFacing = baseDir;
   }
-  Serial.println("[AIRLOCK_B] sending openAirlockB — waiting for enterClearance before wall-follow");
-  sendOpenAirlockB();
+  // Need the airlock tag UID for the open request. Try a fresh RFID read
+  // first — the robot pivoted in place so the reader should still be over
+  // the tag. Fall back to fertileResult.tagId (last server-confirmed scan,
+  // typically set when ARENA_NAV brought us here), and bail with a status
+  // log if neither path yields a UID.
+  char uid[32] = "";
+  if (!readRfidNonBlocking(uid, sizeof(uid))) {
+    strncpy(uid, fertileResult.tagId, sizeof(uid) - 1);
+    uid[sizeof(uid) - 1] = '\0';
+  }
+  if (uid[0] == '\0') {
+    Serial.println("[AIRLOCK_B] no tag UID available — cannot request open");
+    sendStatus("airlock_b_no_tag");
+    return;
+  }
+
+  Serial.print("[AIRLOCK_B] sending openAirlockB tag_id=");
+  Serial.println(uid);
+  sendOpenAirlockB(uid);
   clearanceRetryDeadlineMs = millis() + DOOR_RETRY_INTERVAL_MS;
   navState = NAV_WAIT_ENTER_CLEARANCE;
 }
@@ -1354,6 +1449,11 @@ void navigationUpdate() {
   // below will run that state's tick directly. To bootstrap from scratch use
   // `nav` (sets NAV_BASE_TO_FIRST_JUNCTION) or `arena` (sets NAV_ARENA_NAV)
   // over serial.
+  if (wasDisabled) {
+    Serial.print("[NAV] re-engaged — resuming state=");
+    Serial.println(navStateStr(navState));
+    wasDisabled = false;
+  }
 
   // Stub-state prints fire once per entry, not every tick.
   static NavState lastTickState = (NavState)255;
@@ -1379,6 +1479,7 @@ void navigationUpdate() {
       return;
 
     case NAV_BASE_TO_FIRST_JUNCTION:
+      // First line robot follows to exit based until it reaches junction
       navBaseToFirstJunctionTick();
       return;
 

@@ -11,8 +11,8 @@
 #define SERVO_PIN       9
 #define SERVO_MIN_US    750
 #define SERVO_MAX_US    2250
-#define MIN_ANGLE       60
-#define MAX_ANGLE       180
+#define MIN_ANGLE       60    // get seed
+#define MAX_ANGLE       180   // release seed
 #define STEP_DELAY      5     // ms per degree during sweep
 
 // ─────────────────────────────────────────
@@ -22,17 +22,24 @@
 #define RIGHT_MOTOR     2
 #define MOTORON_ADDRESS 16
 #define MOTOR_VOLTAGE   6     // rated motor voltage
-#define INPUT_VOLTAGE   5     // actual supply voltage
-#define TURN_SPEED      500
-#define FORWARD_SPEED   500
-#define MIN_TURN_SPEED  150   // minimum speed at end of turn slow-zone
+#define INPUT_VOLTAGE   7.2     // actual supply voltage
+// Pivot turn speeds. The "forward" wheel goes forward, the "backward" wheel
+// goes backward; we keep the backward wheel slower because the backward-going
+// side slips more due to weight transfer. Split by direction so left- and
+// right-turn behaviour can be tuned independently — the two motors aren't
+// always equally strong, so symmetric speed commands can produce asymmetric
+// physical turns. RIGHT_* tunes a clockwise pivot, LEFT_* tunes CCW.
+#define RIGHT_TURN_FORWARD_SPEED    800     // left wheel during right turn
+#define RIGHT_TURN_BACKWARD_SPEED   650     // right wheel during right turn
+#define LEFT_TURN_FORWARD_SPEED     800     // right wheel during left turn — tune to match right turn
+#define LEFT_TURN_BACKWARD_SPEED    800     // left wheel during left turn — tune to match right turn
+#define FORWARD_SPEED         400     // Default forward speed
 
 // ─────────────────────────────────────────
 // IMU
 // ─────────────────────────────────────────
 #define GYRO_CALIB_SAMPLES  500
 #define GYRO_SENS           0.00875f  // dps/LSB for ±250 dps range
-#define TURN_SLOW_ZONE_DEG  20.0f     // degrees before target to start slowing
 #define HEADING_KP          3.0f      // proportional gain for hop-heading correction
 
 // ─────────────────────────────────────────
@@ -96,15 +103,21 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 // Line Following
 // ─────────────────────────────────────────
-#define BASE_SPEED              500
+#define BASE_SPEED              400
 #define KP                      0.10f     // proportional gain, normal
 #define KP_AGGRESSIVE           0.15f     // proportional gain after junction
 #define AGGRESSIVE_DURATION_MS  2000      // how long to stay on aggressive KP
 #define LINE_CENTER             4000      // target position (sensor 4 of 9, 0-indexed)
 #define JUNCTION_MIN_ROT_DEG    20.0f     // min rotation before checking for line on spin
 #define JUNCTION_MAX_ROT_DEG    180.0f    // abort spin if exceeded
+#define TURN_LINE_CHECK_MIN_DEG 75.0f     // turnDegrees() ignores line detection until past this rotation — keeps it from latching on the line we're turning off of
 #define JUNCTION_NUDGE_MS       150       // forward nudge duration after spin
 #define JUNCTION_FORWARD_MS     300       // forward drive to centre on junction
+// Per-sensor calibrated value (0..1000) above which a sensor is considered
+// "on the line" for junction classification in getLineState(). Higher than a
+// generic line-present threshold so PID drift onto an outer sensor doesn't
+// register as a side branch — a real branch saturates the IR signal.
+#define JUNCTION_ZONE_ACTIVE_THRESHOLD 700
 #define LINE_FOLLOW_MIN_SPEED   300       // floor for the slow-wheel side of the line-follow PID; below this the motor stalls
 
 // ─────────────────────────────────────────
@@ -121,7 +134,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // Junction sequence
 // -1 = left, 0 = straight, 1 = right
 // ─────────────────────────────────────────
-#define JUNCTION_SEQUENCE  { -1, 0, 1 }
+#define JUNCTION_SEQUENCE  { -1, 0, 1 } // For testing, not currently used
 
 // ─────────────────────────────────────────
 // Encoders (quadrature, 1 per side on the rear wheels; EXTI-capable on Giga).
@@ -145,7 +158,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // Forward distance to drive after an RFID hit before turning or dispensing
 // a seed. Same value for both intents: it offsets the robot so the wheel
 // axis (= turn pivot) and the seed dispenser sit over the tag/hole.
-#define POST_TAG_FORWARD_CM     5.0f
+#define POST_TAG_FORWARD_CM     3.0f  // still needs tuning
 
 // ─────────────────────────────────────────
 // Arena zones: the line grid covers the BOTTOM half of the arena across ALL
@@ -191,11 +204,14 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // #define OBSTACLE_FORWARD_MS     600
 
 // ─────────────────────────────────────────
-// Tunnel wall-following
+// Tunnel wall-following (PD on left/right balance — no target distance,
+// just minimize |leftDist − rightDist| to stay centered)
 // ─────────────────────────────────────────
-#define WALL_FOLLOW_TARGET_CM   14
-#define WALL_KP                 4.0f
-#define WALL_FORWARD_CLEAR_CM   40    // legacy — kept in case tunnel-exit logic reverts
+#define WALL_KP                 25.0f
+#define WALL_KD                 120.0f
+#define WALL_BASE_SPEED         350
+#define WALL_MAX_CORRECTION     600
+#define WALL_EMA_ALPHA          0.4f
 
 // ─────────────────────────────────────────
 // Base exit sequence (base → airlock → arena).

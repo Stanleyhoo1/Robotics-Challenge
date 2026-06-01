@@ -224,7 +224,14 @@ void turnDegrees(float targetDegrees) {
   float accumulated = 0;
   unsigned long lastTime = micros();
   int direction = (targetDegrees > 0) ? 1 : -1;
-  const float SLOW_ZONE = min(TURN_SLOW_ZONE_DEG, abs(targetDegrees) * 0.3f);
+
+  // Per-side speed picked by which wheel is going forward vs backward, and
+  // by which direction we're turning. Right and left turns use separate
+  // constants so motor-strength asymmetry can be compensated per direction.
+  // Right turn (direction>0): LEFT forward, RIGHT backward.
+  // Left turn  (direction<0): LEFT backward, RIGHT forward.
+  int leftSpeed  = (direction > 0) ? RIGHT_TURN_FORWARD_SPEED  : LEFT_TURN_BACKWARD_SPEED;
+  int rightSpeed = (direction > 0) ? RIGHT_TURN_BACKWARD_SPEED : LEFT_TURN_FORWARD_SPEED;
 
   while (true) {
     imu.read();
@@ -234,15 +241,45 @@ void turnDegrees(float targetDegrees) {
     float gz = -((imu.g.z - gyroZOffset) * GYRO_SENS);
     accumulated += gz * dt;
 
-    float remaining = abs(targetDegrees) - abs(accumulated);
-    if (remaining <= 0) break;
+    if (abs(accumulated) >= abs(targetDegrees)) break;
 
-    int speed = (remaining < SLOW_ZONE)
-      ? map(remaining, 0, SLOW_ZONE, MIN_TURN_SPEED, TURN_SPEED)
-      : TURN_SPEED;
+    // Stop the turn early once a line is centred under the IR array. We
+    // require both (a) enough total signal that a line is actually present
+    // and (b) the weighted position is within ±1 sensor of centre — that way
+    // we don't bail when the line is only grazing one edge of the array,
+    // which would dump the line follower a huge initial correction.
+    // TURN_LINE_CHECK_MIN_DEG (e.g. 75°) grace period prevents re-locking on
+    // the original line or stopping while we're still sweeping through it.
+    // In the no-line zone the sum stays well below IR_MIN_LINE_SUM so this
+    // is a no-op there.
+    if (fabsf(accumulated) > TURN_LINE_CHECK_MIN_DEG) {
+      uint16_t cv[IR_SENSOR_COUNT];
+      long avg, sum;
+      readSensors(cv, avg, sum);
+      if (sum >= IR_MIN_LINE_SUM) {
+        long position = avg / sum;
+        if (labs(position - LINE_CENTER) < 1000) {
+          Serial.print("Turn: line centred at pos=");
+          Serial.print(position);
+          Serial.println(", stopping early.");
+          break;
+        }
+      }
+    }
 
-    motoron.setSpeedNow(LEFT_MOTOR,   direction * speed);
-    motoron.setSpeedNow(RIGHT_MOTOR, -direction * speed);
+    // Kill-switch responsiveness: service WiFi (heartbeat / emergency) and
+    // poll the power button so either can stop the turn mid-action.
+    wifiLoop();
+    checkPowerButton();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      Serial.println("Turn aborted: !isEnabled");
+      return;
+    }
+
+    motoron.setSpeedNow(LEFT_MOTOR,   direction * leftSpeed);
+    motoron.setSpeedNow(RIGHT_MOTOR, -direction * rightSpeed);
     delay(5);
   }
 
@@ -302,7 +339,22 @@ void moveForward(int ms, int speed) {
   Serial.println(speed);
   motoron.setSpeedNow(LEFT_MOTOR,  speed);
   motoron.setSpeedNow(RIGHT_MOTOR, speed);
-  delay(ms);
+
+  // Poll for kill switch instead of one big delay(ms) — otherwise the bot
+  // can't be stopped mid-move.
+  unsigned long start = millis();
+  while (millis() - start < (unsigned long)ms) {
+    wifiLoop();
+    checkPowerButton();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      Serial.println("moveForward aborted: !isEnabled");
+      return;
+    }
+    delay(5);
+  }
+
   motoron.setSpeedNow(LEFT_MOTOR,  0);
   motoron.setSpeedNow(RIGHT_MOTOR, 0);
   Serial.println("Stopped.");
@@ -310,8 +362,6 @@ void moveForward(int ms, int speed) {
 
 // ─────────────────────────────────────────
 // Gate motor output on server enable signal
-// Called from main loop() to avoid main.ino
-// referencing `motoron` before it's declared
 // ─────────────────────────────────────────
 void applyMotorEnabled() {
   if (isEnabled) {

@@ -3,35 +3,21 @@
 
 MotoronI2C motoron(16, &Wire1);
 
-void setup() {
-  Serial.begin(115200);
-  // while (!Serial);
-
-  Wire1.begin();
-
+void initMotor() {
   motoron.reinitialize();
   motoron.disableCommandTimeout();
   motoron.clearResetFlag();
+}
 
-  // Check status flags
-  uint16_t status = motoron.getStatusFlags();
-  Serial.print("Status flags: 0x");
-  Serial.println(status, HEX);
-
-  Serial.println("Going forward...");
-
-  motoron.setSpeedNow(1, -400);
-  motoron.setSpeedNow(2, -400);
-
-  delay(3000);
-
-  // Check again after running
-  status = motoron.getStatusFlags();
-  Serial.print("Status flags after running: 0x");
-  Serial.println(status, HEX);
+void setup() {
+  Serial.begin(115200);
+  Wire1.begin();
+  initMotor();
+  Serial.println("Setup done");
 }
 
 void loop() {
-  motoron.setSpeedNow(1, -800);
+  motoron.clearResetFlag();
+  motoron.setSpeedNow(1, 800);
   motoron.setSpeedNow(2, 800);
 }

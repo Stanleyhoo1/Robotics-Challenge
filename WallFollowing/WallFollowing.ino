@@ -2,19 +2,19 @@
 #include <Motoron.h>
 
 // ── Hardware ────────────────────────────────────────────────────────────────
-const int TRIG_PIN = 40;
-const int ECHO_PIN = 41;
+const int TRIG_PIN = 42;
+const int ECHO_PIN = 43;
 
 MotoronI2C motoron(16, &Wire1);
 
 // ── Tuning ──────────────────────────────────────────────────────────────────
-const float TARGET_CM       = 20.0;   // desired gap to wall
-const float Kp              = 18.0;  // proportional gain
-const float Kd              = 25.0;  // derivative gain
-const int   BASE_SPEED      = 300;   // straight-line motor speed (–800 … 800)
-const int   MAX_CORRECTION  = 400;   // clamp so we never stall a motor
+const float TARGET_CM       = 15.0;   // desired gap to wall
+const float Kp              = 25.0;  // proportional gain
+const float Kd              = 120.0;  // derivative gain — high to damp overshoot
+const int   BASE_SPEED      = 350;   // straight-line motor speed (–800 … 800)
+const int   MAX_CORRECTION  = 600;   // clamp so we never stall a motor
 const int   SENSOR_DELAY_MS = 60;    // HC-SR04 minimum cycle time
-const float EMA_ALPHA       = 0.2;   // EMA smoothing (0.1 = smooth, 0.4 = responsive)
+const float EMA_ALPHA       = 0.4;   // EMA smoothing — higher = less derivative lag
 
 // ── State ───────────────────────────────────────────────────────────────────
 float previousDistance = TARGET_CM;
@@ -109,10 +109,9 @@ void loop() {
   correction = constrain(correction, -MAX_CORRECTION, MAX_CORRECTION);
 
   // ── Differential steering ───────────────────────────────────────────────
-  // Sensor on LEFT side: positive error → steer left (boost left, reduce right)
-  // Flip signs if sensor faces right
-  int leftSpeed  = BASE_SPEED + (int)correction;
-  int rightSpeed = BASE_SPEED - (int)correction;
+  // +error → too far from wall → steer toward it
+  int leftSpeed  = BASE_SPEED - (int)correction;
+  int rightSpeed = BASE_SPEED + (int)correction;
   setMotors(leftSpeed, rightSpeed);
 
   // ── Debug ────────────────────────────────────────────────────────────────

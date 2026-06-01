@@ -100,6 +100,36 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     isEnabled = false;
   }
 
+  // Updated server protocol: a single openAirlockReply carries airlock=A|B and
+  // accepted=true|false plus queue counters. Branch on airlock to set the
+  // matching clearance flag. accepted=false logs the reply but leaves the flag
+  // false so the wait state's retry timer resends the open request.
+  if (strstr(msg, "type=openAirlockReply")) {
+    const String airlock  = parseValue(msg, "airlock");
+    const bool   accepted = parseValue(msg, "accepted") == "true";
+    if (accepted) {
+      if (airlock == "A") {
+        exitClearanceReceived = true;
+        Serial.println(">>> openAirlockReply A accepted");
+      } else if (airlock == "B") {
+        enterClearanceReceived = true;
+        Serial.println(">>> openAirlockReply B accepted");
+      } else {
+        Serial.print(">>> openAirlockReply accepted, unknown airlock=");
+        Serial.println(airlock);
+      }
+    } else {
+      Serial.print(">>> openAirlockReply ");
+      Serial.print(airlock);
+      Serial.print(" REJECTED queue_enter=");
+      Serial.print(parseValue(msg, "queue_enter"));
+      Serial.print(" queue_exit=");
+      Serial.println(parseValue(msg, "queue_exit"));
+    }
+  }
+
+  // Back-compat: keep the old single-purpose clearance messages working in
+  // case any server endpoint still emits them.
   if (strstr(msg, "type=exitClearance")) {
     exitClearanceReceived = true;
     Serial.println(">>> exitClearance");
@@ -168,21 +198,53 @@ void sendStatus(const char* status) {
 }
 
 // Airlock open requests. A = exit base, B = enter base.
-// Server responds by opening the gates; we detect the door opening via the
-// forward ultrasonic reading going back above OBSTACLE_STOP_CM (no clearance
-// message handled here).
-void sendOpenAirlockA() {
-  exitClearanceReceived = false;
-  char msg[64];
-  snprintf(msg, sizeof(msg), "type=openAirlockA board_id=%s", BoardId);
+// Wire format: type=openAirlock airlock=A|B tag_id=<UID> board_id=<id>.
+// The server rejects requests without tag_id (reason=missing_tag), so the
+// UID of the airlock RFID tag must be passed in on the first send. Each
+// function stores the UID in a per-airlock buffer so retries via the no-arg
+// overloads (called from the wait-state retry timer and main.ino's
+// door-retry logic) can resend without re-reading the tag.
+static char lastAirlockAUid[32] = "";
+static char lastAirlockBUid[32] = "";
+
+static void sendOpenAirlockMsg(char which, const char* uid) {
+  char msg[96];
+  snprintf(msg, sizeof(msg),
+           "type=openAirlock airlock=%c tag_id=%s board_id=%s",
+           which, uid, BoardId);
   wifiSend(msg);
 }
 
-void sendOpenAirlockB() {
+void sendOpenAirlockA(const char* tagId) {
+  exitClearanceReceived = false;
+  strncpy(lastAirlockAUid, tagId, sizeof(lastAirlockAUid) - 1);
+  lastAirlockAUid[sizeof(lastAirlockAUid) - 1] = '\0';
+  sendOpenAirlockMsg('A', lastAirlockAUid);
+}
+
+void sendOpenAirlockA() {
+  if (lastAirlockAUid[0] == '\0') {
+    Serial.println("sendOpenAirlockA: no stored tag UID, skipping resend");
+    return;
+  }
+  exitClearanceReceived = false;
+  sendOpenAirlockMsg('A', lastAirlockAUid);
+}
+
+void sendOpenAirlockB(const char* tagId) {
   enterClearanceReceived = false;
-  char msg[64];
-  snprintf(msg, sizeof(msg), "type=openAirlockB board_id=%s", BoardId);
-  wifiSend(msg);
+  strncpy(lastAirlockBUid, tagId, sizeof(lastAirlockBUid) - 1);
+  lastAirlockBUid[sizeof(lastAirlockBUid) - 1] = '\0';
+  sendOpenAirlockMsg('B', lastAirlockBUid);
+}
+
+void sendOpenAirlockB() {
+  if (lastAirlockBUid[0] == '\0') {
+    Serial.println("sendOpenAirlockB: no stored tag UID, skipping resend");
+    return;
+  }
+  enterClearanceReceived = false;
+  sendOpenAirlockMsg('B', lastAirlockBUid);
 }
 
 // ─────────────────────────────────────────

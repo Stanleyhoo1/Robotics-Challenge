@@ -9,6 +9,16 @@
 #include "globals.h"
 
 // ─────────────────────────────────────────
+// TODO:
+// 1. Fix turning in place problem, currently wheels slipping/not moving
+// 2. Navigation
+// 3. Emergency
+// 4. Testing planting
+// 5. Obstacle detecting and plotting based on other robot pos
+// ─────────────────────────────────────────
+
+
+// ─────────────────────────────────────────
 // Global definitions (extern'd in globals.h)
 // ─────────────────────────────────────────
 bool  showIR               = false;
@@ -60,10 +70,23 @@ void setup() {
 
 // Power button: poll the pin every tick, toggle isEnabled on each press
 // (HIGH→LOW edge). 200 ms cooldown prevents bounce-induced double-toggle.
-static void checkPowerButton() {
+// Not static so blocking helpers (turnDegrees, moveForward, sweepTo) can
+// also poll it mid-action — otherwise the kill switch is dead while the bot
+// is turning or planting.
+void checkPowerButton() {
   static unsigned long lastPressMs = 0;
   static bool wasPressed = false;
+  static bool firstCall  = true;
   const bool pressedNow = (digitalRead(POWER_BUTTON) == LOW);
+
+  // Seed wasPressed from the real pin state on the first call so that holding
+  // the button at boot doesn't get detected as a fresh press the moment we
+  // start polling.
+  if (firstCall) {
+    wasPressed = pressedNow;
+    firstCall = false;
+    return;
+  }
 
   if (pressedNow && !wasPressed && (millis() - lastPressMs > 200)) {
     isEnabled = !isEnabled;
@@ -169,6 +192,7 @@ void loop() {
     delay(10);
     return;
   }
+  // If obstacle also stop robot
   if (obstacleNow) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
@@ -187,6 +211,7 @@ void loop() {
   if (useStateMachine) {
     navigationUpdate();
   } else {
+    // For testing purposes, in practice not used
     rfidLoop();
     applyMotorEnabled();
   }

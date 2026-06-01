@@ -20,7 +20,7 @@ MotoronI2C motoron(16, &Wire1);
 const uint8_t LEFT_MOTOR  = 1;
 const uint8_t RIGHT_MOTOR = 2;
 
-const int BASE_SPEED = 500;
+const int BASE_SPEED = 300;
 const float KP = 0.2;
 const float KP_AGGRESSIVE = 0.2;
 const int AGGRESSIVE_DURATION = 2000;
@@ -58,7 +58,7 @@ const int    SERVO_MAX_US       = 2250;
 const int    SERVO_MIN_ANGLE    = 60;
 const int    SERVO_MAX_ANGLE    = 180;
 const int    SERVO_STEP_DELAY_MS = 5;
-const float  POST_TAG_FORWARD_CM = 5.0f;  // post-tag nudge AND lost-line forward nudge — both 5 cm
+const float  POST_TAG_FORWARD_CM = 4.0f;  // post-tag nudge AND lost-line forward nudge — both 5 cm
 const uint8_t RFID_I2C_ADDR     = 0x28;
 const uint8_t RFID_RESET_PIN    = 255;
 const unsigned long RFID_SCAN_COOLDOWN_MS = 2000;
@@ -70,7 +70,7 @@ unsigned long lastRfidScanMs = 0;
 // ---- IMU ----
 LSM6 imu;
 const float GYRO_SENS = 0.00875;
-const int TURN_SPEED = 800;   // matches MIN_SPEED — slow zone becomes flat; powered wheels need extra torque to drag the two unpowered ones
+const int TURN_SPEED = 400;   // matches MIN_SPEED — slow zone becomes flat; powered wheels need extra torque to drag the two unpowered ones
 float gyroZOffset = 0;
 
 // ---- Junction ----
