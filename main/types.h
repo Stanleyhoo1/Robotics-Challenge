@@ -79,12 +79,12 @@ enum NavState : uint8_t {
   NAV_DISABLED,
   NAV_LINE_FOLLOW,
   // Base-exit sequence (in order)
-  NAV_BASE_TO_FIRST_JUNCTION,    // line-follow until first intersection
-  NAV_BASE_FIRST_TURN,           // turn right (exit case)
+  NAV_BASE_TO_FIRST_JUNCTION,    // line-follow until first (T) junction
+  NAV_BASE_FIRST_TURN,           // T-junction: right to exit base, left to let another robot in
   NAV_BASE_TO_TAG,               // line-follow until RFID tag detected
   NAV_WAIT_EXIT_CLEARANCE,       // exitRequest sent at base tag, wait for server clearance
-  NAV_BASE_TO_SECOND_JUNCTION,   // exitClearance received, line-follow to T-junction
-  NAV_BASE_SECOND_TURN,          // turn opposite direction of first turn
+  NAV_BASE_TO_SECOND_JUNCTION,   // line-follow to the second (turn-only) junction
+  NAV_BASE_SECOND_TURN,          // turn at the second junction — left or right, never straight
   NAV_BASE_TO_LINE_LOST,         // line-follow until LINE_LOST
   NAV_BASE_LINE_LOST_PAUSE,      // momentary stop after losing line before tunnel approach
   NAV_BASE_FORWARD_NUDGE,        // brief forward drive, then wall-follow tunnel

@@ -233,6 +233,12 @@ void turnDegrees(float targetDegrees) {
   int leftSpeed  = (direction > 0) ? RIGHT_TURN_FORWARD_SPEED  : LEFT_TURN_BACKWARD_SPEED;
   int rightSpeed = (direction > 0) ? RIGHT_TURN_BACKWARD_SPEED : LEFT_TURN_FORWARD_SPEED;
 
+  // Per-direction overshoot trim — subtract a few degrees from the target so
+  // the integrator hits its break sooner when one direction tends to coast
+  // farther. Tune via {RIGHT,LEFT}_TURN_TRIM_DEG in config.h.
+  const float trimDeg   = (direction > 0) ? RIGHT_TURN_TRIM_DEG : LEFT_TURN_TRIM_DEG;
+  const float stopMagDeg = fabsf(targetDegrees) - trimDeg;
+
   while (true) {
     imu.read();
     unsigned long now = micros();
@@ -241,7 +247,7 @@ void turnDegrees(float targetDegrees) {
     float gz = -((imu.g.z - gyroZOffset) * GYRO_SENS);
     accumulated += gz * dt;
 
-    if (abs(accumulated) >= abs(targetDegrees)) break;
+    if (fabsf(accumulated) >= stopMagDeg) break;
 
     // Stop the turn early once a line is centred under the IR array. We
     // require both (a) enough total signal that a line is actually present

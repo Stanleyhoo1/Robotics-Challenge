@@ -29,10 +29,15 @@
 // right-turn behaviour can be tuned independently — the two motors aren't
 // always equally strong, so symmetric speed commands can produce asymmetric
 // physical turns. RIGHT_* tunes a clockwise pivot, LEFT_* tunes CCW.
-#define RIGHT_TURN_FORWARD_SPEED    800     // left wheel during right turn
-#define RIGHT_TURN_BACKWARD_SPEED   650     // right wheel during right turn
-#define LEFT_TURN_FORWARD_SPEED     800     // right wheel during left turn — tune to match right turn
-#define LEFT_TURN_BACKWARD_SPEED    800     // left wheel during left turn — tune to match right turn
+#define RIGHT_TURN_FORWARD_SPEED    600     // left wheel during right turn
+#define RIGHT_TURN_BACKWARD_SPEED   450     // right wheel during right turn
+#define LEFT_TURN_FORWARD_SPEED     400     // right wheel during left turn — tune to match right turn
+#define LEFT_TURN_BACKWARD_SPEED    400     // left wheel during left turn — tune to match right turn
+// Per-direction "stop early" trim, in degrees, subtracted from the target
+// magnitude inside turnDegrees(). If one direction over-rotates, raise its
+// trim so the gyro integrator hits the break point sooner. Default 0 = no trim.
+#define RIGHT_TURN_TRIM_DEG         0.0f
+#define LEFT_TURN_TRIM_DEG          5.0f
 #define FORWARD_SPEED         400     // Default forward speed
 
 // ─────────────────────────────────────────
@@ -103,22 +108,23 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 // Line Following
 // ─────────────────────────────────────────
-#define BASE_SPEED              400
+#define BASE_SPEED              200
 #define KP                      0.10f     // proportional gain, normal
 #define KP_AGGRESSIVE           0.15f     // proportional gain after junction
 #define AGGRESSIVE_DURATION_MS  2000      // how long to stay on aggressive KP
 #define LINE_CENTER             4000      // target position (sensor 4 of 9, 0-indexed)
 #define JUNCTION_MIN_ROT_DEG    20.0f     // min rotation before checking for line on spin
 #define JUNCTION_MAX_ROT_DEG    180.0f    // abort spin if exceeded
-#define TURN_LINE_CHECK_MIN_DEG 75.0f     // turnDegrees() ignores line detection until past this rotation — keeps it from latching on the line we're turning off of
+#define TURN_LINE_CHECK_MIN_DEG 80.0f     // turnDegrees() ignores line detection until past this rotation — keeps it from latching on the line we're turning off of (or the perpendicular fork branch still visible mid-turn)
 #define JUNCTION_NUDGE_MS       150       // forward nudge duration after spin
 #define JUNCTION_FORWARD_MS     300       // forward drive to centre on junction
 // Per-sensor calibrated value (0..1000) above which a sensor is considered
 // "on the line" for junction classification in getLineState(). Higher than a
 // generic line-present threshold so PID drift onto an outer sensor doesn't
 // register as a side branch — a real branch saturates the IR signal.
-#define JUNCTION_ZONE_ACTIVE_THRESHOLD 700
+#define JUNCTION_ZONE_ACTIVE_THRESHOLD 500
 #define LINE_FOLLOW_MIN_SPEED   300       // floor for the slow-wheel side of the line-follow PID; below this the motor stalls
+#define LINE_SEARCH_SPIN_SPEED  400       // wheel speed used by spinUntilLine / sweepForLine — independent of BASE_SPEED so slow line-follow doesn't make the search too slow to spin the wheels
 
 // ─────────────────────────────────────────
 // RFID
@@ -218,8 +224,8 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // Airlock A = exit (base → arena), Airlock B = entry (arena → base).
 // Turn convention: positive = CW (right) per turnDegrees.
 // ─────────────────────────────────────────
-#define BASE_FIRST_TURN_DEG     90.0f      // right at first intersection for exit
-#define BASE_SECOND_TURN_DEG    -90.0f     // left at T-junction toward gate
+#define BASE_FIRST_TURN_DEG     90.0f      // T-junction: positive = right (exit), flip sign to let another robot in
+#define BASE_SECOND_TURN_DEG    -90.0f     // second junction (fork): turn left or right, never straight
 #define BASE_LINE_LOST_PAUSE_MS 1500       // momentary stop after line lost in base before tunnel approach
 #define BASE_FORWARD_NUDGE_MS   500        // drive forward this long after losing line
 #define DOOR_RETRY_INTERVAL_MS  3000       // resend openAirlockX this often while paused at a closed door

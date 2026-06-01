@@ -30,8 +30,11 @@ void readSensors(uint16_t* calibratedVals, long& avg, long& sum) {
 
 // ─────────────────────────────────────────
 // Classify what the sensors are seeing.
-//   - left side  = sensors 0 AND 1 both above JUNCTION_ZONE_ACTIVE_THRESHOLD
-//   - right side = sensors 7 AND 8 both above JUNCTION_ZONE_ACTIVE_THRESHOLD
+// IR array is mounted with sensor 0 on the PHYSICAL RIGHT and sensor 8 on
+// the PHYSICAL LEFT — the zone names below reflect physical orientation,
+// not array indexing.
+//   - right side = sensors 0 AND 1 both above JUNCTION_ZONE_ACTIVE_THRESHOLD
+//   - left  side = sensors 7 AND 8 both above the same threshold
 //   - middle     = any of sensors 3, 4, 5 above the same threshold
 // Patterns:
 //   - left AND right                → LINE_JUNCTION_BOTH (T-junction, ~all 9)
@@ -40,13 +43,15 @@ void readSensors(uint16_t* calibratedVals, long& avg, long& sum) {
 // Requiring BOTH outer sensors on a side AND a high per-sensor threshold
 // keeps PID drift / borderline readings from tripping a phantom fork — a
 // real branch is wide enough to span the outer pair AND saturates the IR.
+// The line-follower's position math (avg / sum) is internally consistent
+// regardless of the physical mount direction, so it isn't affected.
 // ─────────────────────────────────────────
 LineState getLineState(uint16_t* calibratedVals, long sum) {
   if (sum < IR_MIN_LINE_SUM) return LINE_LOST;
 
   const int T = JUNCTION_ZONE_ACTIVE_THRESHOLD;
-  const bool leftActive   = (calibratedVals[0] > T) && (calibratedVals[1] > T);
-  const bool rightActive  = (calibratedVals[7] > T) && (calibratedVals[8] > T);
+  const bool rightActive  = (calibratedVals[0] > T) && (calibratedVals[1] > T);
+  const bool leftActive   = (calibratedVals[7] > T) && (calibratedVals[8] > T);
   const bool middleActive = (calibratedVals[3] > T) ||
                             (calibratedVals[4] > T) ||
                             (calibratedVals[5] > T);
@@ -63,8 +68,8 @@ LineState getLineState(uint16_t* calibratedVals, long sum) {
 // side, then nudge forward to align
 // ─────────────────────────────────────────
 void spinUntilLine(int direction) {
-  int spinLeft  = (direction == -1) ? -BASE_SPEED :  BASE_SPEED;
-  int spinRight = (direction == -1) ?  BASE_SPEED : -BASE_SPEED;
+  int spinLeft  = (direction == -1) ? -LINE_SEARCH_SPIN_SPEED :  LINE_SEARCH_SPIN_SPEED;
+  int spinRight = (direction == -1) ?  LINE_SEARCH_SPIN_SPEED : -LINE_SEARCH_SPIN_SPEED;
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(spinLeft));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(spinRight));
 
@@ -1110,8 +1115,8 @@ static bool baseTurnBlocking(float deg) {
 // Returns true if the line is acquired (motors stopped on the line), false
 // on max rotation or operator disable. Heartbeat stays alive via wifiLoop.
 static bool sweepForLine(int direction, float maxDeg) {
-  int spinLeft  = (direction == -1) ? -BASE_SPEED :  BASE_SPEED;
-  int spinRight = (direction == -1) ?  BASE_SPEED : -BASE_SPEED;
+  int spinLeft  = (direction == -1) ? -LINE_SEARCH_SPIN_SPEED :  LINE_SEARCH_SPIN_SPEED;
+  int spinRight = (direction == -1) ?  LINE_SEARCH_SPIN_SPEED : -LINE_SEARCH_SPIN_SPEED;
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(spinLeft));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(spinRight));
 
@@ -1267,13 +1272,16 @@ static void navBaseToSecondJunctionTick() {
   if (isJunctionState(ls)) {
     motoron.setSpeedNow(LEFT_MOTOR,  0);
     motoron.setSpeedNow(RIGHT_MOTOR, 0);
-    Serial.println("[BASE] second (T) junction reached");
+    Serial.println("[BASE] second junction reached");
     navState = NAV_BASE_SECOND_TURN;
   } else if (ls == LINE_LOST) {
     handleBaseUnexpectedLineLoss();
   }
 }
 
+// Second-junction turn: a fork, never straight. Direction comes from
+// BASE_SECOND_TURN_DEG (sign picks left/right). Last junction in the base
+// exit; hands off to the line-lost watcher for the tunnel approach.
 static void navBaseSecondTurnTick() {
   Serial.print("[BASE] second turn ");
   Serial.print(BASE_SECOND_TURN_DEG);
