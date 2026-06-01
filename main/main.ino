@@ -207,6 +207,9 @@ void loop() {
     return;
   }
 
+//  useStateMachine = false;
+//Serial.println("State: " + useStateMachine);
+
   // ── Enabled body ──────────────────────────────────────────────────────
   if (useStateMachine) {
     navigationUpdate();
