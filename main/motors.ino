@@ -217,6 +217,60 @@ void calibrateGyro() {
   Serial.println("Gyro calibrated.");
 }
 
+// ─────────────────────────────────────────
+// Arena-absolute heading.
+// Cardinal frame: 0°=NORTH, 90°=EAST, 180°=SOUTH, 270°=WEST. Seeded on the
+// WALL_FOLLOW → ARENA_NAV transition (see wallFollow in navigation.ino) and
+// integrated each main-loop tick via updateArenaHeading(). turnDegrees()
+// bakes its measured rotation in on completion, so absolute heading stays
+// correct across the blocking turn.
+// Used by the pre-plant square-up to detect drift between the line PID's
+// actual heading and robotFacing's expected cardinal — line-follow keeps us
+// laterally on the line but can leave us a few degrees skewed.
+// Defined ahead of turnDegrees() so it can reference the static state below.
+// ─────────────────────────────────────────
+float arenaHeadingDeg = 0.0f;
+static unsigned long lastArenaHeadingMicros = 0;
+static bool arenaHeadingActive = false;
+
+static inline void wrapHeading360(float& h) {
+  while (h >= 360.0f) h -= 360.0f;
+  while (h <    0.0f) h += 360.0f;
+}
+
+void startArenaHeading(float initialDeg) {
+  arenaHeadingDeg = initialDeg;
+  wrapHeading360(arenaHeadingDeg);
+  lastArenaHeadingMicros = micros();
+  arenaHeadingActive = true;
+}
+
+void updateArenaHeading() {
+  if (!arenaHeadingActive) return;
+  imu.read();
+  unsigned long now = micros();
+  float dt = (now - lastArenaHeadingMicros) / 1000000.0f;
+  lastArenaHeadingMicros = now;
+  // Discard the first interval after a long pause (disable, blocking turn
+  // that didn't bake in, etc.) — we'd otherwise integrate a ~0 gz over a
+  // huge dt; harmless but pollutes the trace.
+  if (dt > 1.0f) return;
+  float gz = -((imu.g.z - gyroZOffset) * GYRO_SENS);
+  arenaHeadingDeg += gz * dt;
+  wrapHeading360(arenaHeadingDeg);
+}
+
+// Signed delta in (-180, 180] from current heading to the expected cardinal
+// for `expected`. Positive = robot has rotated CW past the cardinal, so
+// turnDegrees(-error) squares it back up.
+float arenaHeadingError(Facing expected) {
+  const float expectedDeg = ((int)expected) * 90.0f;
+  float err = arenaHeadingDeg - expectedDeg;
+  while (err >  180.0f) err -= 360.0f;
+  while (err <= -180.0f) err += 360.0f;
+  return err;
+}
+
 void turnDegrees(float targetDegrees) {
   motoron.clearMotorFault(LEFT_MOTOR);
   motoron.clearMotorFault(RIGHT_MOTOR);
@@ -291,6 +345,15 @@ void turnDegrees(float targetDegrees) {
 
   motoron.setSpeedNow(LEFT_MOTOR,  0);
   motoron.setSpeedNow(RIGHT_MOTOR, 0);
+
+  // Bake the measured rotation into the arena-absolute heading so the next
+  // updateArenaHeading() doesn't double-count the turn. Resync the timestamp
+  // since the main loop didn't tick during this blocking call.
+  if (arenaHeadingActive) {
+    arenaHeadingDeg += accumulated;
+    wrapHeading360(arenaHeadingDeg);
+    lastArenaHeadingMicros = micros();
+  }
   Serial.println("Turn complete.");
 }
 

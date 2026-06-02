@@ -108,5 +108,9 @@ void readAndPrintIR() {
     lastPosition = (lastPosition < (IR_SENSOR_COUNT - 1) * 1000 / 2) ? 0 : (IR_SENSOR_COUNT - 1) * 1000;
   }
   Serial.print("| Pos: ");
-  Serial.println(lastPosition);
+  Serial.print(lastPosition);
+  Serial.print(" sum=");
+  Serial.print(sum);
+  Serial.print(" state=");
+  Serial.println(useStateMachine ? navStateStr(navState) : "(legacy)");
 }

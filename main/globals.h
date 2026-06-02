@@ -40,6 +40,10 @@ extern bool  calibLocked;
 extern int   calibSamples;
 extern float calibSum;
 extern float hopHeadingDeg;
+extern float arenaHeadingDeg;
+void  startArenaHeading(float initialDeg);
+void  updateArenaHeading();
+float arenaHeadingError(Facing expected);
 
 // ── ir_sensors.ino ───────────────────────
 extern uint16_t minValues[];
@@ -63,3 +67,4 @@ extern GridPos   targetPos;
 extern Facing    robotFacing;
 extern int       seedsRemaining;
 extern int       pendingJunctionDir;
+void triggerEmergencyReturn();   // called from wifi.ino on type=emergency enabled=true

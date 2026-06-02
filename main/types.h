@@ -76,8 +76,9 @@ enum TagState : uint8_t {
 // tunnel-traversal phase; not yet implemented.
 // ─────────────────────────────────────────
 enum NavState : uint8_t {
-  NAV_DISABLED,
-  NAV_LINE_FOLLOW,
+  NAV_DISABLED,                  // disabled
+  NAV_EMERGENCY,                 // server-triggered abort: drop current activity, route to base
+  NAV_LINE_FOLLOW,               // basic line following
   // Base-exit sequence (in order)
   NAV_BASE_TO_FIRST_JUNCTION,    // line-follow until first (T) junction
   NAV_BASE_FIRST_TURN,           // T-junction: right to exit base, left to let another robot in
@@ -85,6 +86,8 @@ enum NavState : uint8_t {
   NAV_WAIT_EXIT_CLEARANCE,       // exitRequest sent at base tag, wait for server clearance
   NAV_BASE_TO_SECOND_JUNCTION,   // line-follow to the second (turn-only) junction
   NAV_BASE_SECOND_TURN,          // turn at the second junction — left or right, never straight
+  NAV_BASE_TO_THIRD_JUNCTION,    // line-follow to the third (turn-only) junction
+  NAV_BASE_THIRD_TURN,           // turn at the third junction — same logic as second
   NAV_BASE_TO_LINE_LOST,         // line-follow until LINE_LOST
   NAV_BASE_LINE_LOST_PAUSE,      // momentary stop after losing line before tunnel approach
   NAV_BASE_FORWARD_NUDGE,        // brief forward drive, then wall-follow tunnel
@@ -100,5 +103,5 @@ enum NavState : uint8_t {
   NAV_WAIT_ENTER_CLEARANCE,      // enterRequest sent at airlock B, wait for server clearance
   NAV_TUNNEL_B_WALL_FOLLOW,      // wall-follow down tunnel B (mirrors NAV_WALL_FOLLOW)
   NAV_BASE_RETURN,               // line-follow inside base until LINE_LOST or obstacle
-  NAV_PARKED
+  NAV_PARKED                     // robot done
 };

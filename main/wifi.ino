@@ -95,8 +95,20 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     }
   }
 
-  if (strstr(msg, "type=emergency") || strstr(msg, "type=disable")) {
-    if (isEnabled) Serial.println(">>> DISABLED (emergency/disable)");
+  // Emergency: route the robot back to base immediately (don't disable —
+  // motors need to run for the return drive). Trigger only on enabled=true
+  // so a future cancel/clear semantics could re-use the same message type.
+  if (strstr(msg, "type=emergency")) {
+    if (parseValue(msg, "enabled") == "true") {
+      Serial.println(">>> EMERGENCY received — triggering return-to-base");
+      triggerEmergencyReturn();
+    } else {
+      Serial.println(">>> EMERGENCY received but enabled!=true — ignored");
+    }
+  }
+
+  if (strstr(msg, "type=disable")) {
+    if (isEnabled) Serial.println(">>> DISABLED (disable msg)");
     isEnabled = false;
   }
 

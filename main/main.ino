@@ -66,6 +66,9 @@ void setup() {
   Serial.println("  selftest            → run logic assertions");
   Serial.println("  <anything else>     → forward to server");
   delay(1000);
+
+  // Change robot state here for testing
+  // navState = NAV_WALL_FOLLOW;
 }
 
 // Power button: poll the pin every tick, toggle isEnabled on each press

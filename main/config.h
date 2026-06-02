@@ -31,8 +31,8 @@
 // physical turns. RIGHT_* tunes a clockwise pivot, LEFT_* tunes CCW.
 #define RIGHT_TURN_FORWARD_SPEED    600     // left wheel during right turn
 #define RIGHT_TURN_BACKWARD_SPEED   450     // right wheel during right turn
-#define LEFT_TURN_FORWARD_SPEED     400     // right wheel during left turn — tune to match right turn
-#define LEFT_TURN_BACKWARD_SPEED    400     // left wheel during left turn — tune to match right turn
+#define LEFT_TURN_FORWARD_SPEED     600     // right wheel during left turn — tune to match right turn
+#define LEFT_TURN_BACKWARD_SPEED    450     // left wheel during left turn — tune to match right turn
 // Per-direction "stop early" trim, in degrees, subtracted from the target
 // magnitude inside turnDegrees(). If one direction over-rotates, raise its
 // trim so the gyro integrator hits the break point sooner. Default 0 = no trim.
@@ -107,10 +107,16 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 
 // ─────────────────────────────────────────
 // Line Following
+// PID values mirror line_following/line_following.ino (the validated standalone
+// sketch). LINE_FOLLOW_SPEED is the raw motor command — NOT wrapped in
+// scaleSpeed (the working sketch commanded 300 directly, so we do the same).
+// No positive-only floor: the slow wheel may reverse to pivot sharply on
+// tight corrections, which is what kept the working sketch on the line.
 // ─────────────────────────────────────────
-#define BASE_SPEED              200
-#define KP                      0.10f     // proportional gain, normal
-#define KP_AGGRESSIVE           0.15f     // proportional gain after junction
+#define BASE_SPEED              200       // generic forward speed (junction nudges, dead-reckon hops, recovery)
+#define LINE_FOLLOW_SPEED       300       // base PWM for the line-follow PID — sent raw (no scaleSpeed)
+#define KP                      0.20f     // proportional gain, normal
+#define KP_AGGRESSIVE           0.20f     // proportional gain after junction (= KP; mirrors working sketch which made aggressive mode a no-op)
 #define AGGRESSIVE_DURATION_MS  2000      // how long to stay on aggressive KP
 #define LINE_CENTER             4000      // target position (sensor 4 of 9, 0-indexed)
 #define JUNCTION_MIN_ROT_DEG    20.0f     // min rotation before checking for line on spin
@@ -123,8 +129,8 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // generic line-present threshold so PID drift onto an outer sensor doesn't
 // register as a side branch — a real branch saturates the IR signal.
 #define JUNCTION_ZONE_ACTIVE_THRESHOLD 500
-#define LINE_FOLLOW_MIN_SPEED   300       // floor for the slow-wheel side of the line-follow PID; below this the motor stalls
 #define LINE_SEARCH_SPIN_SPEED  400       // wheel speed used by spinUntilLine / sweepForLine — independent of BASE_SPEED so slow line-follow doesn't make the search too slow to spin the wheels
+#define RECOVERY_SWEEP_MIN_DEG  25.0f     // sweepForLine ignores the IR until this much rotation has accumulated — keeps the recovery from re-latching on the line it just lost
 
 // ─────────────────────────────────────────
 // RFID
@@ -134,7 +140,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 // Board identity
 // ─────────────────────────────────────────
-#define BOARD_ID  "Master"
+#define BOARD_ID  "Master Oogway"
 
 // ─────────────────────────────────────────
 // Junction sequence
@@ -161,10 +167,22 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define CALIB_MIN_SAMPLES       4
 #define CALIB_OUTLIER_PCT       0.20f
 
-// Forward distance to drive after an RFID hit before turning or dispensing
-// a seed. Same value for both intents: it offsets the robot so the wheel
-// axis (= turn pivot) and the seed dispenser sit over the tag/hole.
-#define POST_TAG_FORWARD_CM     3.0f  // still needs tuning
+// Forward distance to drive after an RFID hit before either dispensing a
+// seed or turning in place. Two values because the seed dispenser sits
+// further past the wheel axis than the turn pivot itself, so the planting
+// nudge needs to be longer than the pre-turn nudge.
+//   PRE_PLANT_FORWARD_CM — line up the dispenser over the hole before sweep
+//   PRE_TURN_FORWARD_CM  — line up the wheel axis (= pivot) over the tag /
+//                          junction crossing before rotating in place
+#define PRE_PLANT_FORWARD_CM    5.0f  // still needs tuning
+#define PRE_TURN_FORWARD_CM     5.0f  // still needs tuning
+
+// Square-up threshold before planting. If |arenaHeading − expected cardinal|
+// exceeds this, the robot does a small in-place turnDegrees() to align with
+// the lane axis before the PRE_PLANT_FORWARD_CM nudge. Skew over the nudge
+// translates directly to lateral offset over the hole — a 5° error across
+// 5cm is ~4mm of lateral offset, enough to plant on the rim of a 25mm hole.
+#define PLANT_SQUARE_THRESHOLD_DEG  3.0f
 
 // ─────────────────────────────────────────
 // Arena zones: the line grid covers the BOTTOM half of the arena across ALL
@@ -215,8 +233,8 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 #define WALL_KP                 25.0f
 #define WALL_KD                 120.0f
-#define WALL_BASE_SPEED         350
-#define WALL_MAX_CORRECTION     600
+#define WALL_BASE_SPEED         500
+#define WALL_MAX_CORRECTION     800
 #define WALL_EMA_ALPHA          0.4f
 
 // ─────────────────────────────────────────
@@ -226,6 +244,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 #define BASE_FIRST_TURN_DEG     90.0f      // T-junction: positive = right (exit), flip sign to let another robot in
 #define BASE_SECOND_TURN_DEG    -90.0f     // second junction (fork): turn left or right, never straight
+#define BASE_THIRD_TURN_DEG     90.0f      // third junction (fork): magnitude only — direction picked from detection, BOTH (T) matches first turn
 #define BASE_LINE_LOST_PAUSE_MS 1500       // momentary stop after line lost in base before tunnel approach
 #define BASE_FORWARD_NUDGE_MS   500        // drive forward this long after losing line
 #define DOOR_RETRY_INTERVAL_MS  3000       // resend openAirlockX this often while paused at a closed door

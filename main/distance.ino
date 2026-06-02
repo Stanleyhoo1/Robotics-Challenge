@@ -67,9 +67,19 @@ void printDistance(DistanceSensor sensor) {
 // ─────────────────────────────────────────
 void readAndPrintDistance() {
   if (!showDistance) return;
-  // Reuse the cached forward reading from main.ino's top-of-loop obstacle
-  // check — saves a redundant ~30 ms ultrasonic ping per tick.
-  Serial.print("Forward: ");
+  // Forward reuses the cached reading from main.ino's top-of-loop obstacle
+  // check — saves a redundant ~30 ms ultrasonic ping. Left/Right aren't
+  // cached anywhere, so we ping them here; only pays the cost while the
+  // `distance` debug toggle is on.
+  const float leftCm  = getDistanceCM(SENSOR_LEFT);
+  const float rightCm = getDistanceCM(SENSOR_RIGHT);
+  Serial.print("L: ");
+  if (leftCm < 0) Serial.print("OOR");
+  else { Serial.print(leftCm); Serial.print(" cm"); }
+  Serial.print("  R: ");
+  if (rightCm < 0) Serial.print("OOR");
+  else { Serial.print(rightCm); Serial.print(" cm"); }
+  Serial.print("  F: ");
   if (lastForwardDistanceCm < 0) Serial.println("OOR");
   else { Serial.print(lastForwardDistanceCm); Serial.println(" cm"); }
 }
