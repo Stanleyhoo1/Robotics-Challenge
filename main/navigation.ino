@@ -987,6 +987,7 @@ void wallFollow() {
   static float leftSmoothed  = 0.0f;
   static float rightSmoothed = 0.0f;
   static float prevError     = 0.0f;
+  static float errorIntegral = 0.0f;
   static unsigned long prevTime = 0;
   static bool  initialized   = false;
 
@@ -1002,8 +1003,9 @@ void wallFollow() {
     if (sum >= IR_MIN_LINE_SUM) {
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
-      // Reset PD state so the next entry into wallFollow starts fresh.
-      initialized = false;
+      // Reset PID state so the next entry into wallFollow starts fresh.
+      initialized   = false;
+      errorIntegral = 0.0f;
       if (navState == NAV_TUNNEL_B_WALL_FOLLOW) {
         // Return path: just popped into base — hand off to line-follow.
         Serial.println("[WALL_B] line detected — entering NAV_BASE_RETURN");
@@ -1051,13 +1053,14 @@ void wallFollow() {
       : rawRight;
   }
 
-  // Wait for one good reading from each side before engaging PD; until then
+  // Wait for one good reading from each side before engaging PID; until then
   // drive straight so the robot keeps moving into the tunnel.
   if (!initialized) {
     if (rawLeft >= 0.0f && rawRight >= 0.0f) {
-      initialized = true;
-      prevError   = leftSmoothed - rightSmoothed;
-      prevTime    = millis();
+      initialized   = true;
+      prevError     = leftSmoothed - rightSmoothed;
+      errorIntegral = 0.0f;
+      prevTime      = millis();
     }
     motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(WALL_BASE_SPEED));
     motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(WALL_BASE_SPEED));
@@ -1070,13 +1073,28 @@ void wallFollow() {
   float dt = (now - prevTime) / 1000.0f;
   if (dt <= 0.0f) dt = 0.06f;  // guard against zero/negative dt
 
-  const float error      = leftSmoothed - rightSmoothed;
-  const float dError     = (error - prevError) / dt;
-  float correction       = WALL_KP * error + WALL_KD * dError;
-  correction = constrain(correction, -(float)WALL_MAX_CORRECTION, (float)WALL_MAX_CORRECTION);
+  const float error  = leftSmoothed - rightSmoothed;
+  const float dError = (error - prevError) / dt;
 
-  const int leftSpeed  = constrain(WALL_BASE_SPEED - (int)correction, 0, 800);
-  const int rightSpeed = constrain(WALL_BASE_SPEED + (int)correction, 0, 800);
+  // PID with back-calculation anti-windup: compute the unsaturated correction
+  // first, then only roll the integrator forward if we're NOT already pinned
+  // against WALL_MAX_CORRECTION pushing further in the same direction. The
+  // clamp on errorIntegral is a second line of defence.
+  const float pTerm   = WALL_KP * error;
+  const float dTerm   = WALL_KD * dError;
+  const float iTerm   = WALL_KI * errorIntegral;
+  const float rawCorr = pTerm + iTerm + dTerm;
+  const float corr    = constrain(rawCorr, -(float)WALL_MAX_CORRECTION, (float)WALL_MAX_CORRECTION);
+  const bool  saturatingSameSign =
+      (corr >=  WALL_MAX_CORRECTION && error > 0.0f) ||
+      (corr <= -WALL_MAX_CORRECTION && error < 0.0f);
+  if (!saturatingSameSign) {
+    errorIntegral += error * dt;
+    errorIntegral  = constrain(errorIntegral, -WALL_INTEGRAL_CLAMP, WALL_INTEGRAL_CLAMP);
+  }
+
+  const int leftSpeed  = constrain(WALL_BASE_SPEED - (int)corr, 0, 800);
+  const int rightSpeed = constrain(WALL_BASE_SPEED + (int)corr, 0, 800);
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(leftSpeed));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(rightSpeed));
 

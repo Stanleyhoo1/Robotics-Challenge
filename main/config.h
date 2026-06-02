@@ -228,14 +228,18 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // #define OBSTACLE_FORWARD_MS     600
 
 // ─────────────────────────────────────────
-// Tunnel wall-following (PD on left/right balance — no target distance,
-// just minimize |leftDist − rightDist| to stay centered)
+// Tunnel wall-following (PID on left/right balance — no target distance,
+// just minimize |leftDist − rightDist| to stay centered). Integral term
+// kills steady-state offset from motor/sensor asymmetry (PD alone couldn't
+// — it needs a non-zero error to produce a corrective torque).
 // ─────────────────────────────────────────
 #define WALL_KP                 25.0f
-#define WALL_KD                 120.0f
+#define WALL_KI                 8.0f      // integral gain — hunts down steady-state drift
+#define WALL_KD                 50.0f     // dropped from 120 to reduce jitter (high Kd amplifies ultrasonic noise)
 #define WALL_BASE_SPEED         500
 #define WALL_MAX_CORRECTION     800
-#define WALL_EMA_ALPHA          0.4f
+#define WALL_INTEGRAL_CLAMP     40.0f     // cm·s — caps integrator so a stuck error can't wind up indefinitely
+#define WALL_EMA_ALPHA          0.25f     // heavier smoothing on raw ultrasonic before PID sees it (was 0.4)
 
 // ─────────────────────────────────────────
 // Base exit sequence (base → airlock → arena).
