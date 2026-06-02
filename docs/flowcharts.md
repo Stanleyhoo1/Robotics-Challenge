@@ -74,7 +74,7 @@ Behavioral split:
 
 ## 4. Base exit sequence
 
-From boot to arena nav.
+From boot to arena nav. Three junctions are traversed before entering the tunnel.
 
 ```mermaid
 flowchart TD
@@ -82,7 +82,7 @@ flowchart TD
     B --> C["follow line"]
     C --> D{"junction?"}
     D -->|no| C
-    D -->|yes| E["turn +90°"]
+    D -->|yes| E["turn +90° (1st junction)"]
     E --> F["follow line + RFID poll"]
     F --> G{"RFID hit?"}
     G -->|no| F
@@ -92,15 +92,19 @@ flowchart TD
     I -->|yes| J["follow line"]
     J --> K{"junction?"}
     K -->|no| J
-    K -->|yes| L["turn -90°"]
-    L --> M["follow line to tunnel mouth"]
-    M --> N{"line lost?"}
+    K -->|yes| L["turn -90° (2nd junction)"]
+    L --> M["follow line"]
+    M --> N{"junction?"}
     N -->|no| M
-    N -->|yes| O["nudge forward into tunnel"]
-    O --> P["wall-follow through Tunnel A"]
-    P --> Q{"IR sees line?"}
+    N -->|yes| O["turn ±90° (3rd junction)"]
+    O --> P["follow line until line lost"]
+    P --> Q{"line lost?"}
     Q -->|no| P
-    Q -->|yes| R["enter arena nav"]
+    Q -->|yes| R["pause, then nudge forward into tunnel"]
+    R --> S["wall-follow through Tunnel A"]
+    S --> T{"IR sees line?"}
+    T -->|no| S
+    T -->|yes| U["seed position = Airlock A<br/>enter arena nav"]
 ```
 
 ## 5. Line-lost recovery (base only)
@@ -182,3 +186,70 @@ flowchart TD
 ```
 
 Kept for the test-mode path and for reference; production base-exit and arena flows do not use it.
+
+## 9. Arena navigation tick
+
+`navArenaTick()` runs each loop iteration while in `NAV_ARENA_NAV`. The zone (line vs. no-line) determines the locomotion sub-system; RFID is always the position truth.
+
+```mermaid
+flowchart TD
+    A["navArenaTick"] --> B{"returning AND<br/>at Airlock B?"}
+    B -->|yes| C["stop → NAV_AT_AIRLOCK_B"]
+    B -->|no| D{"forward obstacle<br/>< OBSTACLE_AVOID_CM?"}
+    D -->|yes| E["stop → NAV_AVOID_OBSTACLE"]
+    D -->|no| F["poll RFID"]
+    F --> G{"tag detected?"}
+    G -->|yes| H["stop motors<br/>sendIsFertile<br/>→ NAV_AT_TAG"]
+    G -->|no| I{"row ≥ LINE_ZONE_MIN_ROW?"}
+    I -->|yes (line zone)| J["followLineBase PID<br/>IR guides steering"]
+    I -->|no (no-line zone)| K{"dead-reckon<br/>driving?"}
+    K -->|no| L["reset encoders + heading<br/>start motors → driving=true"]
+    K -->|yes| M["applyHeadingCorrection"]
+    M --> N{"nearNextNode?<br/>(encoder ≥ 85 % of cell)"}
+    N -->|no| A
+    N -->|yes| O["stop, advance robotPos<br/>log rfid_miss_dead_reckon_advance"]
+    J --> A
+    O --> A
+```
+
+## 10. Obstacle avoidance
+
+`navAvoidObstacleTick()` runs once per `NAV_AVOID_OBSTACLE` entry. It marks the blocked cell in the grid map so A\* reroutes around it automatically on the next replan.
+
+```mermaid
+flowchart TD
+    A["NAV_AVOID_OBSTACLE entered"] --> B{"forward dist<br/>< CRASH_STOP_CM?"}
+    B -->|yes| C["reverse CRASH_BACKUP_CM"]
+    B -->|no| D["compute blocked cell<br/>= robotPos + facing"]
+    C --> D
+    D --> E{"cell in grid?"}
+    E -->|yes| F["tagMap[cell] = TAG_BLOCKED"]
+    E -->|no| G["skip — off-grid"]
+    F --> H["replanNextDir()<br/>(A* skips BLOCKED cells)"]
+    G --> H
+    H --> I{"pendingJunctionDir != 0?"}
+    I -->|no| J["no detour — back to NAV_ARENA_NAV"]
+    I -->|yes| K["turnDegrees(dir × 90°)"]
+    K --> L["update robotFacing"]
+    L --> M["→ NAV_ARENA_NAV<br/>(A* now routes around obstacle)"]
+```
+
+## 11. Self-calibrating encoder ticks/cm
+
+Every confirmed straight tag-to-tag hop feeds the calibration accumulator. Dead-reckoning accuracy improves with each sample and locks after `CALIB_MIN_SAMPLES` (4) accepted samples.
+
+```mermaid
+flowchart TD
+    A["RFID fix at new cell"] --> B{"Manhattan distance<br/>from prev fix == 1?"}
+    B -->|no| C["discard — not a clean 1-cell hop"]
+    B -->|yes| D["candidate = straightTicks / GRID_SPACING_CM"]
+    D --> E{"calibSamples > 0?"}
+    E -->|yes| F{"|candidate - mean| / mean<br/>> CALIB_OUTLIER_PCT (20%)?"}
+    F -->|yes| C
+    F -->|no| G["accept sample"]
+    E -->|no| G
+    G --> H["calibSamples++<br/>calibSum += candidate"]
+    H --> I{"calibSamples ≥<br/>CALIB_MIN_SAMPLES (4)?"}
+    I -->|no| J["use TICKS_PER_CM_FALLBACK<br/>for current hops"]
+    I -->|yes| K["lock: calibTicksPerCm = calibSum/n<br/>save to KV flash<br/>sendStatus(calib_locked)"]
+```

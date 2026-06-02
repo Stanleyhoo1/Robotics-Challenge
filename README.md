@@ -1,6 +1,17 @@
 # Robotics-Challenge
 
-All active firmware lives in `main/`. Other top-level folders (`Saviour`, `WallFollowing`, `line_following`, `motor_test`, `servo_motor`, `wifi`) are earlier standalone sketches kept for reference.
+All active firmware lives in `main/`. Top-level companion folders:
+
+| Folder | Purpose |
+|--------|---------|
+| `main/` | **Final firmware** — multi-file Arduino sketch |
+| `docs/` | Software architecture diagrams and Mermaid flowcharts |
+| `testing/` | Standalone test sketches (`line_following`, `motor_test`, `encoder_test`, `turn_test`, `junction_test`, `servo_motor`, `wifi`, `i2c_scan`) and the Testing & Calibration evidence PDF |
+| `grid_nav_test/` | Integration test: line-zone grid navigation with RFID |
+| `grid_nav_no_line_test/` | Integration test: no-line-zone dead-reckoning |
+| `obstacle_avoid_test/` | Integration test: obstacle detection and A\* rerouting |
+| `robot_revival_test/` | Integration test: multi-robot revival mechanic |
+| `WallFollowing/` | Isolated wall-following development sketch |
 
 ## Repository structure
 
@@ -207,7 +218,37 @@ The RGB status LED on pins 48 (R) and 49 (G) reflects a small priority stack:
 | **Solid red**      | `isEnabled` true                                              |
 | **Blinking red**   | `isEnabled` false; awaiting button press / server heartbeat   |
 
+## Algorithm overview
+
+### Line-following PID
+
+`followLineBase()` reads the 9-element IR array and computes a weighted-average position (`avg/sum`, scaled 0–8000). Error = `LINE_CENTER − position`. A proportional correction (`KP × error`) is added to the left wheel and subtracted from the right wheel. Raw PWM is sent directly (no voltage scaling) with a ±800 clamp so the slow wheel can reverse on tight bends. When `sum < IR_MIN_LINE_SUM` (no line under the array), motors are zeroed rather than holding the last PWM — this prevents the robot from drifting past a line end.
+
+### A\* path planner
+
+`aStarNextStep()` runs A\* on the 9×9 grid using Manhattan distance as the heuristic and unit edge costs. All scratch arrays are static (no heap allocation). `TAG_BLOCKED` cells are skipped as neighbours. On each call it returns only the first step of the optimal path, so target selection and replanning happen every node rather than committing to a full route. `selectNextTarget()` picks the nearest cell by tier: `TAG_FERTILE` > `TAG_UNKNOWN` > skip (`TAG_INFERTILE` / `TAG_PLANTED` / `TAG_BLOCKED`). Once seeds are exhausted, the target locks to Airlock B until the robot parks.
+
+### Gyro-based turning
+
+`turnDegrees()` integrates the LSM6 gyro's Z-axis rate (biased subtracted, scaled to °/s) until the accumulated angle reaches the target. Per-direction speed constants (`{RIGHT,LEFT}_TURN_{FORWARD,BACKWARD}_SPEED`) compensate for motor asymmetry. A per-direction early-stop trim (`{RIGHT,LEFT}_TURN_TRIM_DEG`) prevents the gyro-coast overshoot one direction experiences. An early-exit on `sum >= IR_MIN_LINE_SUM` (line centred under array, after a grace rotation) lets the line snap the robot onto the new lane precisely without over-rotating.
+
+### Dead-reckoning in the no-line zone
+
+In rows 0–3 (no guidance lines), the robot drives forward using encoder tick counts and gyro heading-lock. `hopDistanceCm() = straightTicks() / calibTicksPerCm` tracks travel distance. `applyHeadingCorrection()` applies a P-controller on the accumulated heading error to keep the robot straight. Arrival is detected at 85% of `GRID_SPACING_CM` to leave deceleration room. Any drift is corrected at the next RFID fix, which overwrites the estimated position with the server-confirmed ground-truth coordinate.
+
+### Self-calibrating encoder ticks/cm
+
+`calibRecordHop()` accepts every confirmed straight RFID-to-RFID hop (Manhattan distance 1) and computes `ticks / GRID_SPACING_CM`. Outliers more than 20% from the running mean are rejected. After 4 accepted samples the estimate locks and is persisted to KV flash so it survives reboots. Before lock, a hard-coded fallback (`TICKS_PER_CM_FALLBACK = 159.97`) is used.
+
+### Tunnel wall-following (PID)
+
+`wallFollow()` centres the robot between the tunnel walls by minimising `leftDist − rightDist`. A PID controller (KP=25, KI=8, KD=50) drives a differential speed correction. Both sides are EMA-smoothed (α=0.25) to filter ultrasonic noise. Anti-windup prevents integrator blow-up: the integrator only accumulates when the correction is not already saturated in the same sign. Exit condition is the IR array seeing a line — the robot has exited the tunnel.
+
+### Safety architecture
+
+`isEnabled` is the master gate. It is set by server heartbeats and cleared on timeout, `type=disable`/`type=emergency`, or power-button press. The gate is checked at the top of every `loop()` tick and inside every blocking action (turn, nudge, recovery). A heartbeat timeout only triggers once the server has sent at least one heartbeat, so bench-testing without a server never trips the timeout.
+
 ## Further reading
 
-- `docs/software_overview.md` — block diagram of the firmware.
-- `docs/flowcharts.md` — flowcharts for line-following, RFID/planting, kill-switch, base exit, line-lost recovery, LED state.
+- `docs/software_overview.md` — block diagram of the firmware architecture.
+- `docs/flowcharts.md` — Mermaid flowcharts for all main robot behaviours (line-following, RFID/planting, kill-switch, base exit, arena nav, line-lost recovery, return sequence, obstacle avoidance, encoder calibration).

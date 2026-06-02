@@ -9,16 +9,6 @@
 #include "globals.h"
 
 // ─────────────────────────────────────────
-// TODO:
-// 1. Fix turning in place problem, currently wheels slipping/not moving
-// 2. Navigation
-// 3. Emergency
-// 4. Testing planting
-// 5. Obstacle detecting and plotting based on other robot pos
-// ─────────────────────────────────────────
-
-
-// ─────────────────────────────────────────
 // Global definitions (extern'd in globals.h)
 // ─────────────────────────────────────────
 bool  showIR               = false;
@@ -66,9 +56,6 @@ void setup() {
   Serial.println("  selftest            → run logic assertions");
   Serial.println("  <anything else>     → forward to server");
   delay(1000);
-
-  // Change robot state here for testing
-  // navState = NAV_WALL_FOLLOW;
 }
 
 // Power button: poll the pin every tick, toggle isEnabled on each press
