@@ -103,5 +103,8 @@ enum NavState : uint8_t {
   NAV_WAIT_ENTER_CLEARANCE,      // enterRequest sent at airlock B, wait for server clearance
   NAV_TUNNEL_B_WALL_FOLLOW,      // wall-follow down tunnel B (mirrors NAV_WALL_FOLLOW)
   NAV_BASE_RETURN,               // line-follow inside base until LINE_LOST or obstacle
-  NAV_PARKED                     // robot done
+  NAV_PARKED,                    // robot done
+  // Revival
+  NAV_REVIVING,                  // navigating to a distressed robot's grid cell
+  NAV_WAIT_REVIVE_REPLY          // at target, holding, waiting for type=reviveReply
 };

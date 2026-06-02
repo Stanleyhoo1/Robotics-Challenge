@@ -35,9 +35,10 @@
 #define LEFT_TURN_BACKWARD_SPEED    450     // left wheel during left turn — tune to match right turn
 // Per-direction "stop early" trim, in degrees, subtracted from the target
 // magnitude inside turnDegrees(). If one direction over-rotates, raise its
-// trim so the gyro integrator hits the break point sooner. Default 0 = no trim.
-#define RIGHT_TURN_TRIM_DEG         0.0f
-#define LEFT_TURN_TRIM_DEG          5.0f
+// trim so the gyro integrator hits the break point sooner.
+// Values match grid_nav_no_line_test: right turn coasts farther on this bot.
+#define RIGHT_TURN_TRIM_DEG         5.0f
+#define LEFT_TURN_TRIM_DEG          0.0f
 #define FORWARD_SPEED         400     // Default forward speed
 
 // ─────────────────────────────────────────
@@ -168,14 +169,17 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define CALIB_OUTLIER_PCT       0.20f
 
 // Forward distance to drive after an RFID hit before either dispensing a
-// seed or turning in place. Two values because the seed dispenser sits
-// further past the wheel axis than the turn pivot itself, so the planting
-// nudge needs to be longer than the pre-turn nudge.
-//   PRE_PLANT_FORWARD_CM — line up the dispenser over the hole before sweep
-//   PRE_TURN_FORWARD_CM  — line up the wheel axis (= pivot) over the tag /
-//                          junction crossing before rotating in place
-#define PRE_PLANT_FORWARD_CM    5.0f  // still needs tuning
-#define PRE_TURN_FORWARD_CM     5.0f  // still needs tuning
+// seed or turning in place.
+//   PRE_PLANT_FORWARD_CM       — line up the dispenser over the hole before sweep
+//   RIGHT_PRE_TURN_FORWARD_CM  — centre wheel axis before a right (CW) pivot
+//   LEFT_PRE_TURN_FORWARD_CM   — centre wheel axis before a left (CCW) pivot
+//   PRE_TURN_FORWARD_CM        — base-exit sequence only (no per-direction split)
+// Right gets a slightly longer nudge to compensate for asymmetric pivot
+// offset, matching grid_nav_no_line_test constants.
+#define PRE_PLANT_FORWARD_CM        5.0f  // still needs tuning
+#define RIGHT_PRE_TURN_FORWARD_CM   6.0f
+#define LEFT_PRE_TURN_FORWARD_CM    5.0f
+#define PRE_TURN_FORWARD_CM         5.0f  // base-exit turns (baseTurnBlocking)
 
 // Square-up threshold before planting. If |arenaHeading − expected cardinal|
 // exceeds this, the robot does a small in-place turnDegrees() to align with
@@ -213,10 +217,22 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define ARENA_ENTRY_FACING_INT  3
 
 // ─────────────────────────────────────────
-// Forward obstacle threshold (cm). A forward ultrasonic reading in
-// [0, OBSTACLE_STOP_CM) latches a stop. -1 (out of range) does NOT trigger.
+// Obstacle detection thresholds (cm).
+//   CRASH_STOP_CM   — emergency: stop + back up CRASH_BACKUP_CM + mark + replan
+//   OBSTACLE_STOP_CM — mid-hop hard stop: mark + replan, no back-up
+//   OBSTACLE_AVOID_CM — soft trigger: only acted on AT an RFID tag (known grid
+//                       point), so the next-cell assignment is unambiguous
+// A -1 (out-of-range) reading does NOT trigger unless OOR persistence applies.
 // ─────────────────────────────────────────
+#define CRASH_STOP_CM           4     // react immediately, bypass debounce
 #define OBSTACLE_STOP_CM        8
+#define CRASH_BACKUP_CM         5.0f  // cm to reverse after a crash-stop before replanning
+
+// HC-SR04 goes unreliable below ~2 cm (echo overlaps trigger, returns OOR).
+// If the sensor saw something within OBSTACLE_AVOID_CM within this window
+// and then went OOR, treat the OOR as "still close" — otherwise the robot
+// drives through an obstacle it can no longer see.
+#define OOR_PERSISTENCE_MS      400
 
 // ─────────────────────────────────────────
 // Obstacle avoidance (NAV_AVOID_OBSTACLE)
@@ -252,3 +268,11 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define BASE_LINE_LOST_PAUSE_MS 1500       // momentary stop after line lost in base before tunnel approach
 #define BASE_FORWARD_NUDGE_MS   500        // drive forward this long after losing line
 #define DOOR_RETRY_INTERVAL_MS  3000       // resend openAirlockX this often while paused at a closed door
+
+// ─────────────────────────────────────────
+// Revival mechanic (type=distress / type=reviveRequest)
+// ─────────────────────────────────────────
+#define REVIVE_DECEL_START_FRAC  0.60f    // fraction of GRID_SPACING_CM at which decel begins on final hop
+#define REVIVE_MIN_SPEED         80       // minimum speed at the end of revival decel ramp
+#define REVIVE_REPLY_TIMEOUT_MS  5000     // ms before resending reviveRequest
+#define REVIVE_BACK_CM           15.0f    // cm to reverse after a successful revival

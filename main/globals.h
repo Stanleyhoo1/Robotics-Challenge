@@ -58,6 +58,8 @@ extern FertileResult fertileResult;
 extern MiniMessenger messenger;
 extern bool          exitClearanceReceived;   // set true by onMessage on type=exitClearance
 extern bool          enterClearanceReceived;  // set true by onMessage on type=enterClearance
+extern bool          reviveReplyReceived;     // set true by onMessage on type=reviveReply status=success
+void sendReviveRequest(int team, int board);  // defined in wifi.ino
 
 // ── navigation.ino ───────────────────────
 extern NavState  navState;
@@ -68,3 +70,4 @@ extern Facing    robotFacing;
 extern int       seedsRemaining;
 extern int       pendingJunctionDir;
 void triggerEmergencyReturn();   // called from wifi.ino on type=emergency enabled=true
+void triggerRevival(int team, int board, int row, int col);  // called from wifi.ino on type=distress

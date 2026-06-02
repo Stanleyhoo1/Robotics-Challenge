@@ -414,6 +414,7 @@ int      seedsRemaining     = SEED_COUNT;
 int      pendingJunctionDir = 0;
 
 // File-local bookkeeping for the state machine.
+static char          lastRfidUid[32]  = "";            // UID dedup — mirrors lastScannedUid in test sketches
 static GridPos       lastConfirmedPos = { -1, -1 };   // last RFID-confirmed cell, for calib
 static unsigned long atTagEnteredMs   = 0;            // for FERTILE_REPLY_TIMEOUT_MS
 static bool          deadReckonDriving = false;       // no-line-zone hop in progress
@@ -476,6 +477,14 @@ static bool pollRfidAndQueue() {
     strcat(uidStr, byteStr);
   }
   rfid.PICC_HaltA();
+
+  // UID dedup — mirrors lastScannedUid in grid_nav_test / grid_nav_no_line_test.
+  // The hardware PICC_HaltA() prevents re-reads in the same dwell, but a
+  // post-turn nudge can bring the reader back over the same tag. Skip it if
+  // it's the same UID we last dispatched so we don't double-count.
+  if (strcmp(uidStr, lastRfidUid) == 0) return false;
+  strncpy(lastRfidUid, uidStr, sizeof(lastRfidUid) - 1);
+  lastRfidUid[sizeof(lastRfidUid) - 1] = '\0';
 
   clearFertileResult();
   sendIsFertile(uidStr);
@@ -549,6 +558,7 @@ static void navArenaTick() {
     // stop, advance the dead-reckoned position, log it, and start the next
     // hop. The next tick's RFID poll will pick up the next tag.
     if (!deadReckonDriving) {
+      lastRfidUid[0] = '\0';   // clear dedup so the next node's tag is processed fresh
       encoderResetHop();
       resetHopHeading();
       motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
@@ -609,6 +619,29 @@ static void navAtTagTick() {
       }
       robotPos         = newPos;
       lastConfirmedPos = newPos;
+
+      // At a confirmed grid point, any forward reading < OBSTACLE_AVOID_CM
+      // must be in the next cell (no encoder ambiguity). Mark it BLOCKED so
+      // A* routes around it on the replan below — mirrors the at-tag obstacle
+      // peek in obstacle_avoid_test/handleRfidNode.
+      if (lastForwardDistanceCm >= 0.0f &&
+          lastForwardDistanceCm < (float)OBSTACLE_AVOID_CM) {
+        GridPos fwd = robotPos;
+        switch (robotFacing) {
+          case NORTH: fwd.row--; break;
+          case SOUTH: fwd.row++; break;
+          case EAST:  fwd.col++; break;
+          case WEST:  fwd.col--; break;
+        }
+        if (fwd.valid() && tagMap[fwd.row][fwd.col] != TAG_BLOCKED) {
+          tagMap[fwd.row][fwd.col] = TAG_BLOCKED;
+          Serial.print("[AT_TAG] forward ");
+          Serial.print(lastForwardDistanceCm, 1);
+          Serial.print(" cm → marking (");
+          Serial.print(fwd.row); Serial.print(",");
+          Serial.print(fwd.col); Serial.println(") BLOCKED");
+        }
+      }
     }
 
     // Return-mode arrival check: if we're at Airlock B with seeds exhausted,
@@ -647,11 +680,13 @@ static void navAtTagTick() {
 
 // ─────────────────────────────────────────
 // NAV_POST_TAG_NUDGE tick: drive forward by the intent-specific nudge
-// distance (PRE_PLANT_FORWARD_CM for planting, PRE_TURN_FORWARD_CM for
-// turning) using the encoder hop counter, then dispatch. Planting →
-// NAV_PLANTING; turning → in-place turnDegrees + back to NAV_ARENA_NAV.
-// The nudge uses the same encoder/ticksPerCm path as a full hop, so it
-// falls back to TICKS_PER_CM_FALLBACK before calibration locks.
+// distance using the encoder hop counter, then dispatch.
+//   Plant  → PRE_PLANT_FORWARD_CM (single value, dispenser over hole)
+//   Turn   → RIGHT_PRE_TURN_FORWARD_CM or LEFT_PRE_TURN_FORWARD_CM
+//             (per-direction, matches grid_nav_no_line_test)
+// In the no-line zone heading correction is applied each tick so the
+// nudge stays straight (mirrors driveForwardCmHeadingLocked in the test).
+// After a turn, a JUNCTION_NUDGE_MS post-turn nudge re-engages the line.
 // ─────────────────────────────────────────
 static void navPostTagNudgeTick() {
   if (!nudgeStarted) {
@@ -675,18 +710,37 @@ static void navPostTagNudgeTick() {
       }
     }
     encoderResetHop();
+    resetHopHeading();   // track heading during the nudge (used in no-line zone)
     motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
     motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
     nudgeStarted = true;
     return;
   }
 
+  // Per-direction nudge distance for turns (mirrors grid_nav_no_line_test).
+  // Plant intent always uses PRE_PLANT_FORWARD_CM regardless of direction.
   const float targetCm = postTagIntentPlanting ? PRE_PLANT_FORWARD_CM
-                                               : PRE_TURN_FORWARD_CM;
-  if (hopDistanceCm() < targetCm) return;
+                       : (pendingJunctionDir > 0 ? RIGHT_PRE_TURN_FORWARD_CM
+                                                 : LEFT_PRE_TURN_FORWARD_CM);
+
+  if (hopDistanceCm() < targetCm) {
+    // No-line zone: re-apply heading correction each tick so the nudge
+    // stays straight — mirrors driveForwardCmHeadingLocked() in the test.
+    // Line zone: IR PID owns the steering; motor commands here would
+    // interfere, so leave the already-commanded speed untouched.
+    if (robotPos.row < LINE_ZONE_MIN_ROW) {
+      const float corr = HEADING_KP * hopHeadingDeg;
+      motoron.setSpeedNow(LEFT_MOTOR,
+        scaleSpeed(constrain(BASE_SPEED - (int)corr, 0, 800)));
+      motoron.setSpeedNow(RIGHT_MOTOR,
+        scaleSpeed(constrain(BASE_SPEED + (int)corr, 0, 800)));
+    }
+    return;
+  }
 
   motoron.setSpeedNow(LEFT_MOTOR,  0);
   motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  endHopHeading();
   nudgeStarted = false;
 
   if (postTagIntentPlanting) {
@@ -706,6 +760,29 @@ static void navPostTagNudgeTick() {
     robotFacing        = facingAfterTurn(robotFacing, pendingJunctionDir);
     pendingJunctionDir = 0;
   }
+
+  // Post-turn nudge: brief forward drive to re-engage the line (or clear the
+  // tag RFID range in the no-line zone) before the next hop — mirrors the
+  // JUNCTION_NUDGE_MS step in both test files.
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+  {
+    unsigned long ts = millis();
+    while (millis() - ts < (unsigned long)JUNCTION_NUDGE_MS) {
+      wifiLoop();
+      checkPowerButton();
+      if (!isEnabled) {
+        motoron.setSpeedNow(LEFT_MOTOR,  0);
+        motoron.setSpeedNow(RIGHT_MOTOR, 0);
+        handleNavDisable();
+        return;
+      }
+      delay(5);
+    }
+  }
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+
   navState = NAV_ARENA_NAV;
 }
 
@@ -771,6 +848,181 @@ void handleNavDisable() {
   deadReckonDriving = false;
   endHopHeading();
   wasDisabled = true;
+}
+
+// ─────────────────────────────────────────
+// Revival mechanic. Triggered by wifi.ino on type=distress.
+// Saves current nav state, navigates to the distressed robot's grid cell
+// using A* + encoder dead-reckoning. On the final hop, speed ramps from
+// BASE_SPEED down to REVIVE_MIN_SPEED (smooth decel to contact). Sends
+// type=reviveRequest, waits for type=reviveReply status=success, reverses
+// REVIVE_BACK_CM, then resumes whichever arena state was interrupted.
+// ─────────────────────────────────────────
+struct RevivalCtx {
+  GridPos  target;
+  int      team;
+  int      board;
+  NavState savedState;
+};
+static RevivalCtx    revivalCtx;
+static bool          inRevival         = false;
+static bool          revivalHopStarted = false;
+static unsigned long reviveRequestMs   = 0;
+
+void triggerRevival(int team, int board, int row, int col) {
+  if (inRevival) {
+    Serial.println("[REVIVE] already reviving — distress ignored");
+    return;
+  }
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  deadReckonDriving = false;
+  endHopHeading();
+
+  revivalCtx.target     = { (int8_t)row, (int8_t)col };
+  revivalCtx.team       = team;
+  revivalCtx.board      = board;
+  revivalCtx.savedState = navState;
+  inRevival             = true;
+  revivalHopStarted     = false;
+
+  Serial.print("[REVIVE] triggered: team="); Serial.print(team);
+  Serial.print(" board="); Serial.print(board);
+  Serial.print(" target=("); Serial.print(row);
+  Serial.print(","); Serial.print(col); Serial.println(")");
+  sendStatus("revival_started");
+  navState = NAV_REVIVING;
+}
+
+static void finishRevival() {
+  inRevival         = false;
+  revivalHopStarted = false;
+  replanNextDir();
+  // Return to arena nav for any state that lives inside the arena loop.
+  // Non-arena states (base sequence, tunnels) are resumed as-is.
+  const NavState s = revivalCtx.savedState;
+  const bool arenaContext = (s == NAV_ARENA_NAV      || s == NAV_AT_TAG       ||
+                             s == NAV_POST_TAG_NUDGE  || s == NAV_PLANTING    ||
+                             s == NAV_AVOID_OBSTACLE  || s == NAV_REVIVING    ||
+                             s == NAV_WAIT_REVIVE_REPLY);
+  navState = arenaContext ? NAV_ARENA_NAV : s;
+  Serial.print("[REVIVE] complete — resuming "); Serial.println(navStateStr(navState));
+  sendStatus("revival_complete");
+}
+
+// NAV_REVIVING tick: drive toward the distressed robot cell-by-cell, then
+// hand off to NAV_WAIT_REVIVE_REPLY once we've arrived.
+static void navRevivingTick() {
+  // Already at target?
+  if (robotPos.valid() && robotPos.equals(revivalCtx.target)) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    revivalHopStarted   = false;
+    endHopHeading();
+    reviveReplyReceived = false;
+    reviveRequestMs     = 0;
+    navState            = NAV_WAIT_REVIVE_REPLY;
+    return;
+  }
+
+  // Need a valid position to route from.
+  GridPos next;
+  if (!robotPos.valid() || !aStarNextStep(robotPos, revivalCtx.target, next)) {
+    Serial.println("[REVIVE] A* failed — no path, abandoning revival");
+    finishRevival();
+    return;
+  }
+
+  // Turn to face next hop direction before starting the hop.
+  const Facing want    = facingToward(robotPos, next);
+  const int    turnDir = getTurnDir(robotFacing, want);
+  if (turnDir != 0 && !revivalHopStarted) {
+    Serial.print("[REVIVE] turning "); Serial.print(turnDir * 90); Serial.println(" deg");
+    turnDegrees((float)turnDir * 90.0f);
+    wifiLoop();
+    if (!isEnabled) { handleNavDisable(); return; }
+    robotFacing = facingAfterTurn(robotFacing, turnDir);
+    return;
+  }
+
+  // The final hop gets smooth deceleration; intermediate hops run at BASE_SPEED.
+  const int distToTarget = abs(robotPos.row - revivalCtx.target.row) +
+                           abs(robotPos.col  - revivalCtx.target.col);
+  const bool finalHop = (distToTarget == 1);
+
+  // Arm the hop on the first tick after the turn.
+  if (!revivalHopStarted) {
+    encoderResetHop();
+    resetHopHeading();
+    motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(BASE_SPEED));
+    motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(BASE_SPEED));
+    revivalHopStarted = true;
+    return;
+  }
+
+  // Drive: heading correction + decel ramp on the final hop.
+  const float dist = hopDistanceCm();
+  int speed = BASE_SPEED;
+  if (finalHop) {
+    const float decelStart = GRID_SPACING_CM * REVIVE_DECEL_START_FRAC;
+    const float decelEnd   = GRID_SPACING_CM * NODE_ARRIVAL_FRACTION;
+    if (dist >= decelStart) {
+      const float progress = constrain((dist - decelStart) / (decelEnd - decelStart), 0.0f, 1.0f);
+      speed = (int)(BASE_SPEED - (float)(BASE_SPEED - REVIVE_MIN_SPEED) * progress);
+    }
+  }
+  const float headingCorr = HEADING_KP * hopHeadingDeg;
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(constrain(speed - (int)headingCorr, 0, 800)));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(constrain(speed + (int)headingCorr, 0, 800)));
+
+  // Arrival: encoder crossed the node-arrival threshold.
+  if (dist >= GRID_SPACING_CM * NODE_ARRIVAL_FRACTION) {
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+    revivalHopStarted = false;
+    endHopHeading();
+    advancePosOneCell();
+    Serial.print("[REVIVE] hopped to ("); Serial.print(robotPos.row);
+    Serial.print(","); Serial.print(robotPos.col); Serial.println(")");
+    // Next tick re-enters the top of this function and checks if we've arrived.
+  }
+}
+
+// NAV_WAIT_REVIVE_REPLY tick: hold still, periodically send reviveRequest
+// until the server acknowledges, then reverse REVIVE_BACK_CM and resume.
+static void navWaitReviveReplyTick() {
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  wifiPoll();
+
+  // Send / resend reviveRequest.
+  if (reviveRequestMs == 0 ||
+      millis() - reviveRequestMs > (unsigned long)REVIVE_REPLY_TIMEOUT_MS) {
+    sendReviveRequest(revivalCtx.team, revivalCtx.board);
+    reviveRequestMs = millis();
+  }
+
+  if (!reviveReplyReceived) return;
+
+  // Server confirmed — back away from the revived robot.
+  Serial.println("[REVIVE] reviveReply success — backing away");
+  encoderResetHop();
+  motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(-BASE_SPEED));
+  motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(-BASE_SPEED));
+  while (fabsf(hopDistanceCm()) < REVIVE_BACK_CM) {
+    wifiLoop();
+    checkPowerButton();
+    if (!isEnabled) {
+      motoron.setSpeedNow(LEFT_MOTOR,  0);
+      motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      handleNavDisable();
+      return;
+    }
+    delay(5);
+  }
+  motoron.setSpeedNow(LEFT_MOTOR,  0);
+  motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  finishRevival();
 }
 
 // ─────────────────────────────────────────
@@ -844,6 +1096,8 @@ const char* navStateStr(NavState s) {
     case NAV_TUNNEL_B_WALL_FOLLOW:      return "NAV_TUNNEL_B_WALL_FOLLOW";
     case NAV_BASE_RETURN:               return "NAV_BASE_RETURN";
     case NAV_PARKED:                    return "NAV_PARKED";
+    case NAV_REVIVING:                  return "NAV_REVIVING";
+    case NAV_WAIT_REVIVE_REPLY:         return "NAV_WAIT_REVIVE_REPLY";
   }
   return "?";
 }
@@ -888,6 +1142,8 @@ const char* navActivityStr(NavState s) {
     case NAV_TUNNEL_B_WALL_FOLLOW:      return "wall-following through tunnel B";
     case NAV_BASE_RETURN:               return "line-following back into base";
     case NAV_PARKED:                    return "parked";
+    case NAV_REVIVING:                  return "navigating to distressed robot";
+    case NAV_WAIT_REVIVE_REPLY:         return "at target — holding, waiting for reviveReply";
   }
   return "?";
 }
@@ -914,6 +1170,30 @@ const char* tagStateStr(TagState s) {
 // HEARTBEAT_TIMEOUT_MS budget once you allow for the post-turn wifiLoop).
 // ─────────────────────────────────────────
 static void navAvoidObstacleTick() {
+  // Crash-tier entry: if we're within CRASH_STOP_CM (or OOR-after-close set
+  // the state), back up CRASH_BACKUP_CM before the in-place turn so the pivot
+  // has clearance from the obstacle. Normal 8..20 cm entries skip this.
+  if (lastForwardDistanceCm >= 0.0f && lastForwardDistanceCm < (float)CRASH_STOP_CM) {
+    Serial.print("[AVOID] crash distance "); Serial.print(lastForwardDistanceCm, 1);
+    Serial.print(" cm — backing up "); Serial.print(CRASH_BACKUP_CM); Serial.println(" cm");
+    encoderResetHop();
+    motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(-BASE_SPEED));
+    motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(-BASE_SPEED));
+    while (fabsf(hopDistanceCm()) < CRASH_BACKUP_CM) {
+      wifiLoop();
+      checkPowerButton();
+      if (!isEnabled) {
+        motoron.setSpeedNow(LEFT_MOTOR,  0);
+        motoron.setSpeedNow(RIGHT_MOTOR, 0);
+        handleNavDisable();
+        return;
+      }
+      delay(5);
+    }
+    motoron.setSpeedNow(LEFT_MOTOR,  0);
+    motoron.setSpeedNow(RIGHT_MOTOR, 0);
+  }
+
   // The blocked cell is the one immediately forward of robotPos in the
   // current heading. If we're off-grid (robotPos at the edge facing out),
   // skip the mark — there's no in-grid cell to flag.
@@ -1774,6 +2054,14 @@ void navigationUpdate() {
     case NAV_PARKED:
       motoron.setSpeedNow(LEFT_MOTOR,  0);
       motoron.setSpeedNow(RIGHT_MOTOR, 0);
+      return;
+
+    case NAV_REVIVING:
+      navRevivingTick();
+      return;
+
+    case NAV_WAIT_REVIVE_REPLY:
+      navWaitReviveReplyTick();
       return;
   }
 }

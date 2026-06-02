@@ -388,10 +388,8 @@ void updateHopHeading() {
 
 void applyHeadingCorrection() {
   float correction = HEADING_KP * hopHeadingDeg;
-  int leftSpeed  = FORWARD_SPEED - (int)correction;
-  int rightSpeed = FORWARD_SPEED + (int)correction;
-  leftSpeed  = constrain(leftSpeed,  0, 800);
-  rightSpeed = constrain(rightSpeed, 0, 800);
+  int leftSpeed  = constrain(BASE_SPEED - (int)correction, 0, 800);
+  int rightSpeed = constrain(BASE_SPEED + (int)correction, 0, 800);
   motoron.setSpeedNow(LEFT_MOTOR,  scaleSpeed(leftSpeed));
   motoron.setSpeedNow(RIGHT_MOTOR, scaleSpeed(rightSpeed));
 }

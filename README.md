@@ -56,7 +56,66 @@ Install via Arduino IDE → Library Manager:
 ### 1. Install the board package
 Arduino IDE → Boards Manager → search "Giga" → install **Arduino Mbed OS Giga Boards**.
 
-### 2. Create `main/secrets.h`
+### 2. Patch the Motoron library for mbed I2C
+
+The stock Motoron library uses `TwoWire*` for its I2C bus type, which is incompatible with the Arduino Giga's mbed-based I2C stack. After installing the library, replace the `MotoronI2C` class in:
+
+```
+Documents/Arduino/libraries/Motoron/src/Motoron.h  (lines ~1923–2010)
+```
+
+with the mbed-compatible version below:
+
+```cpp
+class MotoronI2C : public MotoronBase
+{
+public:
+  MotoronI2C(uint8_t address = 16, arduino::MbedI2C* wire = &Wire) : bus(wire), address(address) {}
+
+  void setBus(arduino::MbedI2C * bus) { this->bus = bus; }
+  arduino::MbedI2C * getBus() { return this->bus; }
+  void setAddress(uint8_t address) { this->address = address; }
+  uint8_t getAddress() { return address; }
+
+private:
+  arduino::MbedI2C * bus;
+  uint8_t address;
+
+  void sendCommandCore(uint8_t length, const uint8_t * cmd, bool sendCrc) override
+  {
+    bus->beginTransmission(address);
+    for (uint8_t i = 0; i < length; i++) { bus->write(cmd[i]); }
+    if (sendCrc) { bus->write(calculateCrc(length, cmd)); }
+    lastError = bus->endTransmission();
+  }
+
+  void flushTransmission() { }
+
+  void readResponse(uint8_t length, uint8_t * response) override
+  {
+    bool crcEnabled = protocolOptions & (1 << MOTORON_PROTOCOL_OPTION_CRC_FOR_RESPONSES);
+    uint8_t byteCount = bus->requestFrom(address, (uint8_t)(length + crcEnabled));
+    if (byteCount != length + crcEnabled)
+    {
+      memset(response, 0, length);
+      lastError = 50;
+      return;
+    }
+    lastError = 0;
+    uint8_t * ptr = response;
+    for (uint8_t i = 0; i < length; i++) { *ptr = bus->read(); ptr++; }
+    if (crcEnabled && bus->read() != calculateCrc(length, response))
+    {
+      lastError = 51;
+      return;
+    }
+  }
+};
+```
+
+This patch is required to pass `Wire1` (a `arduino::MbedI2C` object) to the Motoron constructor. Without it, the firmware will not compile on the Giga.
+
+### 3. Create `main/secrets.h`
 This file is gitignored and must be created locally. Template:
 
 ```cpp
@@ -68,14 +127,14 @@ This file is gitignored and must be created locally. Template:
 #define GROUP_ID       "your-team-id"
 ```
 
-### 3. First-boot calibration
+### 4. First-boot calibration
 Two things calibrate at boot:
 
 - **Gyro bias** — robot must be motionless for ~2 seconds during boot. The Serial monitor will print "Calibrating gyro, keep still..." followed by "Gyro calibrated." Don't bump the chassis during this window.
 - **IR sensor min/max** — only needed once. Hold the robot over the line, open the Serial monitor, send the `c` command. You have 10 seconds to slide the array fully across the line. Values are persisted in flash via `kvstore_global_api`, so subsequent boots reuse them.
 - **Encoder ticks/cm** — self-calibrates at run time from confirmed straight tag-to-tag hops once the bot is in the arena. Until `CALIB_MIN_SAMPLES` (4) accepted samples land, `TICKS_PER_CM_FALLBACK` is used. Calibration is persisted in KV — use the `recalib` serial command to wipe and re-acquire.
 
-### 4. I2C bus order
+### 5. I2C bus order
 `setup()` calls `Wire.begin()` then `Wire1.begin()`. `Wire` carries the RFID reader (default I2C pins, address 0x28); `Wire1` carries the Motoron motor controller (address 16) and the LSM6 IMU. Both buses must be initialized before any device on them is touched.
 
 ## Upload

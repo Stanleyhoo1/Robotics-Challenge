@@ -5,7 +5,8 @@
 #include "secrets.h"
 
 // FertileResult struct defined in types.h
-FertileResult fertileResult = {false, false, false, "", 0, 0};
+FertileResult fertileResult  = {false, false, false, "", 0, 0};
+bool          reviveReplyReceived = false;
 
 // Server-side clearance acks. Reset on each open-request send, set true on
 // receipt of the corresponding clearance message. Currently used for
@@ -152,6 +153,34 @@ void onMessage(const MessageMetadata& metadata, const uint8_t* payload, size_t l
     Serial.println(">>> enterClearance");
   }
 
+  if (strstr(msg, "type=distress")) {
+    const String robotVal = parseValue(msg, "robot0");
+    if (robotVal.length() > 0) {
+      int team = 0, board = 0, x = 0, y = 0;
+      // Wire format: robot0=<team>.<board>,<x>,<y>  (x=col, y=row — same as isFertileReply)
+      if (sscanf(robotVal.c_str(), "%d.%d,%d,%d", &team, &board, &x, &y) == 4) {
+        Serial.print(">>> distress: team="); Serial.print(team);
+        Serial.print(" board="); Serial.print(board);
+        Serial.print(" x="); Serial.print(x);
+        Serial.print(" y="); Serial.println(y);
+        triggerRevival(team, board, y, x);   // row=y, col=x — matches server convention
+      } else {
+        Serial.println(">>> distress: could not parse robot0 field");
+      }
+    }
+  }
+
+  if (strstr(msg, "type=reviveReply")) {
+    const String status = parseValue(msg, "status");
+    if (status == "success") {
+      reviveReplyReceived = true;
+      Serial.print(">>> reviveReply success target=");
+      Serial.println(parseValue(msg, "target"));
+    } else {
+      Serial.print(">>> reviveReply non-success status="); Serial.println(status);
+    }
+  }
+
   if (strstr(msg, "type=isFertileReply")) {
     fertileResult.received = true;
     fertileResult.fertile  = parseValue(msg, "fertile") == "true";
@@ -206,6 +235,14 @@ void sendPosition(int x, int y) {
 void sendStatus(const char* status) {
   char msg[96];
   snprintf(msg, sizeof(msg), "type=status board_id=%s msg=%s", BoardId, status);
+  wifiSend(msg);
+}
+
+void sendReviveRequest(int team, int board) {
+  char msg[96];
+  snprintf(msg, sizeof(msg),
+           "type=reviveRequest target_team=%d target_board=%d board_id=%s",
+           team, board, BoardId);
   wifiSend(msg);
 }
 
