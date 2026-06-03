@@ -245,6 +245,8 @@ void loop() {
     }
   }
 
+  //useStateMachine = false;
+
   // ── Enabled body ──────────────────────────────────────────────────────
   if (useStateMachine) {
     navigationUpdate();
