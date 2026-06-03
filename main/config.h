@@ -176,7 +176,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 //   PRE_TURN_FORWARD_CM        — base-exit sequence only (no per-direction split)
 // Right gets a slightly longer nudge to compensate for asymmetric pivot
 // offset, matching grid_nav_no_line_test constants.
-#define PRE_PLANT_FORWARD_CM        4.0f  // still needs tuning
+#define PRE_PLANT_FORWARD_CM        5.0f  // still needs tuning / 5
 #define RIGHT_PRE_TURN_FORWARD_CM   6.0f // 6
 #define LEFT_PRE_TURN_FORWARD_CM    5.0f
 #define PRE_TURN_FORWARD_CM         5.0f  // base-exit turns (baseTurnBlocking)
