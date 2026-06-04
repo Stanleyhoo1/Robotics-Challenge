@@ -124,7 +124,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 #define JUNCTION_MAX_ROT_DEG    180.0f    // abort spin if exceeded
 #define TURN_LINE_CHECK_MIN_DEG 80.0f     // turnDegrees() ignores line detection until past this rotation — keeps it from latching on the line we're turning off of (or the perpendicular fork branch still visible mid-turn)
 #define JUNCTION_NUDGE_MS       150       // forward nudge duration after spin
-#define JUNCTION_FORWARD_MS     300       // forward drive to centre on junction
+#define JUNCTION_FORWARD_MS     280       // forward drive to centre on junction
 // Per-sensor calibrated value (0..1000) above which a sensor is considered
 // "on the line" for junction classification in getLineState(). Higher than a
 // generic line-present threshold so PID drift onto an outer sensor doesn't
@@ -141,7 +141,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // ─────────────────────────────────────────
 // Board identity
 // ─────────────────────────────────────────
-#define BOARD_ID  "Master Oogway"
+#define BOARD_ID  "leonard"
 
 // ─────────────────────────────────────────
 // Junction sequence
@@ -225,7 +225,7 @@ static const int IR_SENSOR_PINS[IR_SENSOR_COUNT] = {30, 31, 32, 33, 34, 35, 36, 
 // A -1 (out-of-range) reading does NOT trigger unless OOR persistence applies.
 // ─────────────────────────────────────────
 #define CRASH_STOP_CM           4     // react immediately, bypass debounce
-#define OBSTACLE_STOP_CM        8
+#define OBSTACLE_STOP_CM        5
 #define CRASH_BACKUP_CM         5.0f  // cm to reverse after a crash-stop before replanning
 
 // HC-SR04 goes unreliable below ~2 cm (echo overlaps trigger, returns OOR).
